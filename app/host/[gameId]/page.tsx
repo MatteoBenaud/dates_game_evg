@@ -86,7 +86,10 @@ export default function HostPage() {
         .eq('game_id', gameId)
         .order('question_number', { ascending: true })
 
-      setQuestions(questionsData || [])
+      setQuestions((questionsData || []).map(q => ({
+        ...q,
+        status: q.status as QuestionStatus
+      })))
 
       // Update addedQuestions when loading from DB
       if (questionsData && questionsData.length > 0) {
