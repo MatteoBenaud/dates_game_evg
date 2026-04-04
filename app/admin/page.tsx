@@ -26,35 +26,19 @@ export default function AdminDashboard() {
 
   const loadGames = async () => {
     try {
+      // Single optimized query using database function
       const { data: gamesData } = await supabase
-        .from('games')
-        .select('*')
-        .order('created_at', { ascending: false })
+        .rpc('get_games_with_stats')
 
       if (gamesData) {
-        // Load stats for each game
-        const gamesWithStats = await Promise.all(
-          gamesData.map(async (game) => {
-            const { count: playerCount } = await supabase
-              .from('players')
-              .select('*', { count: 'exact', head: true })
-              .eq('game_id', game.id)
-
-            const { count: questionCount } = await supabase
-              .from('questions')
-              .select('*', { count: 'exact', head: true })
-              .eq('game_id', game.id)
-
-            return {
-              id: game.id,
-              code: game.code,
-              status: game.status as GameStatus,
-              created_at: game.created_at,
-              player_count: playerCount || 0,
-              question_count: questionCount || 0,
-            }
-          })
-        )
+        const gamesWithStats = gamesData.map((game: any) => ({
+          id: game.id,
+          code: game.code,
+          status: game.status as GameStatus,
+          created_at: game.created_at,
+          player_count: Number(game.player_count) || 0,
+          question_count: Number(game.question_count) || 0,
+        }))
 
         setGames(gamesWithStats)
       }

@@ -165,6 +165,19 @@ export type Database = {
     }
     Functions: {
       generate_game_code: { Args: never; Returns: string }
+      get_games_with_stats: {
+        Args: never
+        Returns: Array<{
+          id: string
+          code: string
+          status: string
+          created_at: string | null
+          current_question_index: number
+          host_ready: boolean | null
+          player_count: number
+          question_count: number
+        }>
+      }
     }
     Enums: {
       [_ in never]: never

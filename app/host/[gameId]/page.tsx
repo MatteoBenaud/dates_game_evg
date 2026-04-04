@@ -125,40 +125,57 @@ export default function HostPage() {
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'players', filter: `game_id=eq.${gameId}` },
-        () => loadGame()
+        async () => {
+          // Only reload players, not entire game
+          const { data: playersData } = await supabase
+            .from('players')
+            .select('*')
+            .eq('game_id', gameId)
+            .order('joined_at', { ascending: true })
+          setPlayers(playersData || [])
+        }
       )
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'answers' },
-        async (payload) => {
-          console.log('Answer change detected:', payload)
-          // Reload answers for current question
-          const { data: questionsData } = await supabase
-            .from('questions')
-            .select('*')
-            .eq('game_id', gameId)
-            .order('question_number', { ascending: true })
-
-          const { data: gameData } = await supabase
-            .from('games')
-            .select('current_question_index')
-            .eq('id', gameId)
-            .single()
-
-          if (questionsData && gameData && questionsData[gameData.current_question_index]) {
-            loadAnswers(questionsData[gameData.current_question_index].id)
+        async (payload: any) => {
+          // Only reload answers if it's for current question
+          if (questions.length > 0 && questions[currentQuestionIndex]) {
+            const currentQuestionId = questions[currentQuestionIndex].id
+            if (payload.new?.question_id === currentQuestionId || !payload.new) {
+              loadAnswers(currentQuestionId)
+            }
           }
         }
       )
       .on(
         'postgres_changes',
         { event: 'UPDATE', schema: 'public', table: 'games', filter: `id=eq.${gameId}` },
-        () => loadGame()
+        (payload) => {
+          // Update status and index locally without full reload
+          if (payload.new.status) {
+            setGameStatus(payload.new.status as GameStatus)
+          }
+          if (payload.new.current_question_index !== undefined) {
+            setCurrentQuestionIndex(payload.new.current_question_index)
+          }
+        }
       )
       .on(
         'postgres_changes',
-        { event: '*', schema: 'public', table: 'questions' },
-        () => loadGame()
+        { event: '*', schema: 'public', table: 'questions', filter: `game_id=eq.${gameId}` },
+        async () => {
+          // Only reload questions list
+          const { data: questionsData } = await supabase
+            .from('questions')
+            .select('*')
+            .eq('game_id', gameId)
+            .order('question_number', { ascending: true })
+          setQuestions((questionsData || []).map(q => ({
+            ...q,
+            status: q.status as QuestionStatus
+          })))
+        }
       )
       .subscribe()
 

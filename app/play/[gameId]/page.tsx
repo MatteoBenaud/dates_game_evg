@@ -41,6 +41,8 @@ export default function PlayerPage() {
   const [hasJoined, setHasJoined] = useState(false)
   const [playerId, setPlayerId] = useState<string | null>(null)
   const [game, setGame] = useState<Game | null>(null)
+  const [gameStatus, setGameStatus] = useState<GameStatus>('waiting')
+  const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0)
   const [currentQuestion, setCurrentQuestion] = useState<Question | null>(null)
   const [myAnswer, setMyAnswer] = useState<Answer | null>(null)
   const [selectedDate, setSelectedDate] = useState('')
@@ -143,17 +145,32 @@ export default function PlayerPage() {
       .on(
         'postgres_changes',
         { event: 'UPDATE', schema: 'public', table: 'games', filter: `id=eq.${gameId}` },
-        () => loadGame()
+        (payload) => {
+          // Update only game status locally without reload
+          if (payload.new.status) {
+            setGameStatus(payload.new.status as GameStatus)
+          }
+          if (payload.new.current_question_index !== undefined) {
+            setCurrentQuestionIndex(payload.new.current_question_index)
+            loadCurrentQuestion()
+          }
+        }
       )
       .on(
         'postgres_changes',
-        { event: '*', schema: 'public', table: 'questions' },
-        () => loadCurrentQuestion()
+        { event: '*', schema: 'public', table: 'questions', filter: `game_id=eq.${gameId}` },
+        () => {
+          // Only reload current question
+          loadCurrentQuestion()
+        }
       )
       .on(
         'postgres_changes',
-        { event: '*', schema: 'public', table: 'players' },
-        () => loadPlayers()
+        { event: '*', schema: 'public', table: 'players', filter: `game_id=eq.${gameId}` },
+        () => {
+          // Only reload players list
+          loadPlayers()
+        }
       )
       .subscribe()
 
