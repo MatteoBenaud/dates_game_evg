@@ -276,7 +276,7 @@ export default function TimelineReveal({ correctDate, answers, players, onComple
             </div>
 
             <div className="relative overflow-hidden rounded-[28px] border border-white/12 bg-[linear-gradient(180deg,_rgba(255,255,255,0.08),_rgba(255,255,255,0.02))] px-4 py-10 md:px-8">
-              <div className={`absolute left-6 right-6 top-1/2 h-3 -translate-y-1/2 rounded-full bg-gradient-to-r from-rose-400 via-amber-300 via-emerald-300 to-sky-400 shadow-[0_0_40px_rgba(255,255,255,0.18)] ${phase !== 'spotlight' ? 'track-glow' : 'opacity-40'}`} />
+              <div className={`absolute left-6 right-6 top-1/2 h-3 -translate-y-1/2 rounded-full bg-gradient-to-r from-rose-400 via-amber-300 via-emerald-300 to-sky-400 shadow-[0_0_40px_rgba(255,255,255,0.18)] ${phase === 'dropzone' || phase === 'complete' ? 'track-glow' : 'opacity-40'}`} />
 
               <div className="pointer-events-none absolute inset-y-8 left-1/2 w-[2px] -translate-x-1/2 bg-white/80 shadow-[0_0_24px_rgba(255,255,255,0.5)]">
                 <div className="absolute -top-2 left-1/2 h-5 w-5 -translate-x-1/2 rounded-full border-4 border-[#0d1324] bg-[var(--brand)]" />
