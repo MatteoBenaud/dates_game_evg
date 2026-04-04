@@ -27,7 +27,7 @@ export default function BubbleLobby({ players }: BubbleLobbyProps) {
   const canvasRef = useRef<HTMLDivElement>(null)
   const [bubbles, setBubbles] = useState<Bubble[]>([])
   const bubblesRef = useRef<Bubble[]>([])
-  const animationRef = useRef<number>()
+  const animationRef = useRef<number | undefined>(undefined)
 
   // Initialize bubbles when players change
   useEffect(() => {

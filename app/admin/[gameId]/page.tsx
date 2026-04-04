@@ -9,8 +9,9 @@ interface Game {
   id: string
   code: string
   status: GameStatus
-  created_at: string
+  created_at: string | null
   current_question_index: number
+  host_ready: boolean | null
 }
 
 interface Player {
@@ -18,7 +19,9 @@ interface Player {
   pseudo: string
   total_score: number | null
   connected: boolean | null
-  joined_at: string
+  joined_at: string | null
+  avatar_url?: string | null
+  game_id?: string
 }
 
 interface Question {
@@ -182,7 +185,7 @@ export default function AdminGamePage() {
     const csv = [
       ['Pseudo', 'Score Total', 'Date de participation'].join(','),
       ...players.map(p =>
-        [p.pseudo, p.total_score || 0, new Date(p.joined_at).toLocaleDateString('fr-FR')].join(',')
+        [p.pseudo, p.total_score || 0, p.joined_at ? new Date(p.joined_at).toLocaleDateString('fr-FR') : 'N/A'].join(',')
       ),
     ].join('\n')
 
@@ -225,13 +228,13 @@ export default function AdminGamePage() {
             <div>
               <h1 className="text-4xl font-bold text-gray-900 mb-2">Partie {game.code}</h1>
               <p className="text-gray-600">
-                Créée le {new Date(game.created_at).toLocaleDateString('fr-FR', {
+                Créée le {game.created_at ? new Date(game.created_at).toLocaleDateString('fr-FR', {
                   day: '2-digit',
                   month: 'long',
                   year: 'numeric',
                   hour: '2-digit',
                   minute: '2-digit',
-                })}
+                }) : 'N/A'}
               </p>
             </div>
             <div className="flex gap-3">

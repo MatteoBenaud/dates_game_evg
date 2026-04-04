@@ -9,7 +9,7 @@ interface GameWithStats {
   id: string
   code: string
   status: GameStatus
-  created_at: string
+  created_at: string | null
   player_count: number
   question_count: number
 }
@@ -104,6 +104,8 @@ export default function AdminDashboard() {
 
       // Generate new code
       const { data: newCode } = await supabase.rpc('generate_game_code')
+
+      if (!newCode) throw new Error('Failed to generate game code')
 
       // Create new game
       const { data: newGame, error: gameError } = await supabase
@@ -273,13 +275,13 @@ export default function AdminDashboard() {
                     <div>
                       <p className="text-sm text-gray-500 mb-1">Créée le</p>
                       <p className="text-sm text-gray-900">
-                        {new Date(game.created_at).toLocaleDateString('fr-FR', {
+                        {game.created_at ? new Date(game.created_at).toLocaleDateString('fr-FR', {
                           day: '2-digit',
                           month: 'short',
                           year: 'numeric',
                           hour: '2-digit',
                           minute: '2-digit',
-                        })}
+                        }) : 'N/A'}
                       </p>
                     </div>
                   </div>
