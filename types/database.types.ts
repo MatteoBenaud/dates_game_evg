@@ -61,6 +61,7 @@ export type Database = {
           code: string
           created_at: string | null
           current_question_index: number
+          host_ready: boolean | null
           id: string
           status: string
         }
@@ -68,6 +69,7 @@ export type Database = {
           code: string
           created_at?: string | null
           current_question_index?: number
+          host_ready?: boolean | null
           id?: string
           status?: string
         }
@@ -75,6 +77,7 @@ export type Database = {
           code?: string
           created_at?: string | null
           current_question_index?: number
+          host_ready?: boolean | null
           id?: string
           status?: string
         }
@@ -82,6 +85,7 @@ export type Database = {
       }
       players: {
         Row: {
+          avatar_url: string | null
           connected: boolean | null
           game_id: string
           id: string
@@ -90,6 +94,7 @@ export type Database = {
           total_score: number | null
         }
         Insert: {
+          avatar_url?: string | null
           connected?: boolean | null
           game_id: string
           id?: string
@@ -98,6 +103,7 @@ export type Database = {
           total_score?: number | null
         }
         Update: {
+          avatar_url?: string | null
           connected?: boolean | null
           game_id?: string
           id?: string

@@ -6,6 +6,8 @@ import { supabase } from '@/lib/supabase'
 import { GameStatus, QuestionStatus } from '@/types/game.types'
 import { calculateScore } from '@/utils/score'
 import AnimatedLeaderboard from '@/components/AnimatedLeaderboard'
+import BubbleLobby from '@/components/BubbleLobby'
+import TimelineReveal from '@/components/TimelineReveal'
 
 interface Player {
   id: string
@@ -41,19 +43,16 @@ export default function HostPage() {
   const [questions, setQuestions] = useState<Question[]>([])
   const [answers, setAnswers] = useState<Answer[]>([])
   const [loading, setLoading] = useState(true)
+  const [showTimeline, setShowTimeline] = useState(false)
+  const [showLeaderboard, setShowLeaderboard] = useState(false)
 
-  // Setup phase: for entering questions
-  const [currentQuestionText, setCurrentQuestionText] = useState('')
-  const [currentQuestionDate, setCurrentQuestionDate] = useState('')
-  const [addedQuestions, setAddedQuestions] = useState<Array<{ text: string; correct_date: string }>>([])
-  const [isAddingQuestion, setIsAddingQuestion] = useState(false)
-  const [isInSetupMode, setIsInSetupMode] = useState(true)
 
   useEffect(() => {
     loadGame()
     const cleanup = setupRealtimeSubscriptions()
     return cleanup
   }, [gameId])
+
 
   const loadGame = async () => {
     try {
@@ -65,6 +64,12 @@ export default function HostPage() {
         .single()
 
       if (gameError) throw gameError
+
+      // Set host_ready to true when host opens the page
+      await supabase
+        .from('games')
+        .update({ host_ready: true })
+        .eq('id', gameId)
 
       setGameCode(game.code)
       setGameStatus(game.status as GameStatus)
@@ -90,11 +95,6 @@ export default function HostPage() {
         ...q,
         status: q.status as QuestionStatus
       })))
-
-      // Update addedQuestions when loading from DB
-      if (questionsData && questionsData.length > 0) {
-        setAddedQuestions(questionsData.map(q => ({ text: q.text, correct_date: q.correct_date })))
-      }
 
       // Load answers for current question
       if (questionsData && questionsData.length > 0) {
@@ -167,68 +167,6 @@ export default function HostPage() {
     }
   }
 
-  const handleAddQuestion = async () => {
-    if (!currentQuestionText.trim() || !currentQuestionDate) return
-
-    setIsAddingQuestion(true)
-
-    try {
-      // Add to database immediately
-      const { error } = await supabase.from('questions').insert([{
-        game_id: gameId,
-        question_number: addedQuestions.length + 1,
-        text: currentQuestionText,
-        correct_date: currentQuestionDate,
-        status: 'locked' as QuestionStatus,
-      }])
-
-      if (error) throw error
-
-      // Add to local state only (don't reload from DB to stay in setup mode)
-      setAddedQuestions([...addedQuestions, { text: currentQuestionText, correct_date: currentQuestionDate }])
-
-      // Reset form
-      setCurrentQuestionText('')
-      setCurrentQuestionDate('')
-    } catch (error) {
-      console.error('Error adding question:', error)
-      alert('Erreur lors de l\'ajout de la question')
-    } finally {
-      setIsAddingQuestion(false)
-    }
-  }
-
-  const handleRemoveQuestion = async (index: number) => {
-    try {
-      // Get the question from database
-      const { data: questionsData } = await supabase
-        .from('questions')
-        .select('id')
-        .eq('game_id', gameId)
-        .eq('question_number', index + 1)
-        .single()
-
-      if (questionsData) {
-        // Delete from database
-        await supabase.from('questions').delete().eq('id', questionsData.id)
-      }
-
-      // Remove from local state
-      const newQuestions = addedQuestions.filter((_, i) => i !== index)
-      setAddedQuestions(newQuestions)
-
-      // Renumber remaining questions
-      for (let i = 0; i < newQuestions.length; i++) {
-        await supabase
-          .from('questions')
-          .update({ question_number: i + 1 })
-          .eq('game_id', gameId)
-          .eq('text', newQuestions[i].text)
-      }
-    } catch (error) {
-      console.error('Error removing question:', error)
-    }
-  }
 
   const handleStartGame = async () => {
     try {
@@ -255,21 +193,6 @@ export default function HostPage() {
     }
   }
 
-  const handleOpenQuestion = async () => {
-    const currentQuestion = questions[currentQuestionIndex]
-    if (!currentQuestion) return
-
-    try {
-      await supabase
-        .from('questions')
-        .update({ status: 'open' })
-        .eq('id', currentQuestion.id)
-
-      loadGame()
-    } catch (error) {
-      console.error('Error opening question:', error)
-    }
-  }
 
   const handleRevealQuestion = async () => {
     const currentQuestion = questions[currentQuestionIndex]
@@ -286,21 +209,8 @@ export default function HostPage() {
           .eq('id', answer.id)
       }
 
-      // Update player total scores
-      for (const player of players) {
-        const playerAnswers = await supabase
-          .from('answers')
-          .select('score, question_id')
-          .eq('player_id', player.id)
-          .in('question_id', questions.map(q => q.id))
-
-        const totalScore = playerAnswers.data?.reduce((sum, a) => sum + (a.score || 0), 0) || 0
-
-        await supabase
-          .from('players')
-          .update({ total_score: totalScore })
-          .eq('id', player.id)
-      }
+      // Reload answers with scores
+      await loadAnswers(currentQuestion.id)
 
       // Mark question as revealed
       await supabase
@@ -308,14 +218,47 @@ export default function HostPage() {
         .update({ status: 'revealed' })
         .eq('id', currentQuestion.id)
 
-      loadGame()
+      // Show timeline animation
+      setShowTimeline(true)
+      setShowLeaderboard(false)
     } catch (error) {
       console.error('Error revealing question:', error)
     }
   }
 
+  const handleTimelineComplete = async () => {
+    const currentQuestion = questions[currentQuestionIndex]
+
+    // Update player total scores
+    for (const player of players) {
+      const playerAnswers = await supabase
+        .from('answers')
+        .select('score, question_id')
+        .eq('player_id', player.id)
+        .in('question_id', questions.map(q => q.id))
+
+      const totalScore = playerAnswers.data?.reduce((sum, a) => sum + (a.score || 0), 0) || 0
+
+      await supabase
+        .from('players')
+        .update({ total_score: totalScore })
+        .eq('id', player.id)
+    }
+
+    // Reload players with updated scores
+    await loadGame()
+
+    // Hide timeline, show leaderboard
+    setShowTimeline(false)
+    setShowLeaderboard(true)
+  }
+
   const handleNextQuestion = async () => {
     const nextIndex = currentQuestionIndex + 1
+
+    // Reset timeline and leaderboard states
+    setShowTimeline(false)
+    setShowLeaderboard(false)
 
     if (nextIndex >= questions.length) {
       // Finish game
@@ -352,106 +295,26 @@ export default function HostPage() {
     )
   }
 
-  // Setup phase: enter questions
-  if (isInSetupMode && gameStatus === 'waiting') {
+  // Redirect to admin if no questions configured
+  if (questions.length === 0 && gameStatus === 'waiting') {
     return (
-      <div className="min-h-screen bg-gray-100 p-8">
-        <div className="max-w-4xl mx-auto bg-white rounded-xl shadow-lg p-8">
-          <div className="mb-8">
-            <h1 className="text-3xl font-bold text-gray-900 mb-2">Configuration de la partie</h1>
-            <p className="text-gray-600">Code de la partie: <span className="font-mono text-2xl font-bold text-blue-600">{gameCode}</span></p>
+      <div className="min-h-screen bg-gray-100 flex items-center justify-center p-8">
+        <div className="max-w-md bg-white rounded-xl shadow-lg p-8 text-center">
+          <div className="w-16 h-16 bg-yellow-100 rounded-full flex items-center justify-center mx-auto mb-4">
+            <svg className="w-8 h-8 text-yellow-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+            </svg>
           </div>
-
-          <div className="space-y-6">
-            <div className="flex items-center justify-between">
-              <h2 className="text-xl font-semibold text-gray-800">Questions ({addedQuestions.length})</h2>
-            </div>
-
-            {/* List of added questions */}
-            {addedQuestions.length > 0 && (
-              <div className="space-y-3 mb-6">
-                {addedQuestions.map((q, index) => (
-                  <div key={index} className="flex items-start gap-3 bg-gray-50 rounded-lg p-4">
-                    <div className="flex-1">
-                      <div className="flex items-center gap-2 mb-2">
-                        <span className="font-bold text-gray-700">Question {index + 1}</span>
-                        <span className="text-sm text-gray-500">
-                          ({new Date(q.correct_date).toLocaleDateString('fr-FR')})
-                        </span>
-                      </div>
-                      <p className="text-gray-900">{q.text}</p>
-                    </div>
-                    <button
-                      onClick={() => handleRemoveQuestion(index)}
-                      className="text-red-600 hover:text-red-700 p-2"
-                      title="Supprimer"
-                    >
-                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                      </svg>
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {/* Form to add new question */}
-            <div className="border-2 border-blue-300 bg-blue-50 rounded-lg p-6 space-y-4">
-              <h3 className="font-semibold text-gray-800">Ajouter une question</h3>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Question
-                </label>
-                <input
-                  type="text"
-                  placeholder="Ex: Quel jour suis-je allé pour la première fois au Maroc ?"
-                  value={currentQuestionText}
-                  onChange={(e) => setCurrentQuestionText(e.target.value)}
-                  className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Date correcte
-                </label>
-                <input
-                  type="date"
-                  value={currentQuestionDate}
-                  onChange={(e) => setCurrentQuestionDate(e.target.value)}
-                  className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                />
-              </div>
-
-              <button
-                onClick={handleAddQuestion}
-                disabled={!currentQuestionText.trim() || !currentQuestionDate || isAddingQuestion}
-                className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {isAddingQuestion ? 'Ajout...' : '+ Ajouter cette question'}
-              </button>
-            </div>
-
-            {/* Ready to start when at least one question */}
-            {addedQuestions.length > 0 && (
-              <div className="border-t pt-6">
-                <p className="text-sm text-gray-600 mb-3">
-                  {addedQuestions.length} question{addedQuestions.length > 1 ? 's' : ''} ajoutée{addedQuestions.length > 1 ? 's' : ''}.
-                  Vous pouvez commencer la partie ou ajouter plus de questions.
-                </p>
-                <button
-                  onClick={() => {
-                    setIsInSetupMode(false)
-                    loadGame()
-                  }}
-                  className="w-full bg-green-600 hover:bg-green-700 text-white font-semibold py-4 px-6 rounded-lg transition-colors text-lg"
-                >
-                  Passer à l'étape suivante
-                </button>
-              </div>
-            )}
-          </div>
+          <h1 className="text-2xl font-bold text-gray-900 mb-2">Partie non configurée</h1>
+          <p className="text-gray-600 mb-6">
+            Cette partie n'a pas encore de questions. Configurez-la depuis l'interface admin.
+          </p>
+          <button
+            onClick={() => router.push(`/admin/${gameId}`)}
+            className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-lg transition-colors"
+          >
+            → Aller à l'admin
+          </button>
         </div>
       </div>
     )
@@ -464,9 +327,16 @@ export default function HostPage() {
   if (gameStatus === 'waiting') {
     return (
       <div className="min-h-screen bg-gray-100 p-8">
-        <div className="max-w-4xl mx-auto bg-white rounded-xl shadow-lg p-8">
-          <div className="text-center mb-8">
-            <h1 className="text-4xl font-bold text-gray-900 mb-4">En attente des joueurs</h1>
+        <div className="max-w-4xl mx-auto">
+          <button
+            onClick={() => router.push(`/admin/${gameId}`)}
+            className="text-blue-600 hover:text-blue-700 font-medium mb-4 flex items-center gap-2"
+          >
+            ⚙️ Admin
+          </button>
+          <div className="bg-white rounded-xl shadow-lg p-8">
+            <div className="text-center mb-8">
+              <h1 className="text-4xl font-bold text-gray-900 mb-4">En attente des joueurs</h1>
             <div className="bg-blue-50 border-2 border-blue-500 rounded-xl p-6 mb-6">
               <p className="text-gray-600 mb-2">Code de la partie:</p>
               <p className="font-mono text-6xl font-bold text-blue-600">{gameCode}</p>
@@ -474,22 +344,10 @@ export default function HostPage() {
           </div>
 
           <div className="mb-8">
-            <h2 className="text-2xl font-semibold text-gray-800 mb-4">
-              Joueurs connectés ({players.length})
+            <h2 className="text-2xl font-semibold text-gray-800 mb-4 text-center">
+              {players.length} {players.length > 1 ? 'joueurs connectés' : 'joueur connecté'}
             </h2>
-            <div className="space-y-2">
-              {players.map((player) => (
-                <div key={player.id} className="flex items-center justify-between bg-gray-50 rounded-lg p-4">
-                  <span className="font-medium text-gray-900">{player.pseudo}</span>
-                  <span className={`px-3 py-1 rounded-full text-sm ${player.connected ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
-                    {player.connected ? 'Connecté' : 'Déconnecté'}
-                  </span>
-                </div>
-              ))}
-              {players.length === 0 && (
-                <p className="text-gray-500 text-center py-8">Aucun joueur pour le moment...</p>
-              )}
-            </div>
+            <BubbleLobby players={players} />
           </div>
 
           <button
@@ -499,6 +357,7 @@ export default function HostPage() {
           >
             Lancer la partie
           </button>
+          </div>
         </div>
       </div>
     )
@@ -549,31 +408,31 @@ export default function HostPage() {
               </button>
             )}
 
-            {currentQuestionStatus === 'revealed' && (
-              <>
-                <div className="flex-1 bg-gray-50 border-2 border-gray-300 rounded-lg p-4 text-center">
-                  <p className="text-gray-600 text-sm mb-1">Bonne réponse:</p>
-                  <p className="text-2xl font-bold text-gray-900">
-                    {new Date(currentQuestion.correct_date).toLocaleDateString('fr-FR', {
-                      year: 'numeric',
-                      month: 'long',
-                      day: 'numeric'
-                    })}
-                  </p>
-                </div>
-                <button
-                  onClick={handleNextQuestion}
-                  className="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-semibold py-4 px-6 rounded-lg transition-colors text-lg"
-                >
-                  {currentQuestionIndex + 1 >= questions.length ? 'Terminer la partie' : 'Question suivante'}
-                </button>
-              </>
+            {currentQuestionStatus === 'revealed' && showLeaderboard && (
+              <button
+                onClick={handleNextQuestion}
+                className="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-semibold py-4 px-6 rounded-lg transition-colors text-lg"
+              >
+                {currentQuestionIndex + 1 >= questions.length ? 'Terminer la partie' : 'Question suivante'}
+              </button>
             )}
           </div>
         </div>
 
+        {/* Timeline reveal - Full screen overlay */}
+        {currentQuestionStatus === 'revealed' && showTimeline && (
+          <div className="fixed inset-0 z-50">
+            <TimelineReveal
+              correctDate={currentQuestion.correct_date}
+              answers={answers}
+              players={players}
+              onComplete={handleTimelineComplete}
+            />
+          </div>
+        )}
+
         {/* Leaderboard */}
-        {currentQuestionStatus === 'revealed' && (
+        {currentQuestionStatus === 'revealed' && showLeaderboard && (
           <div className="bg-white rounded-xl shadow-lg p-8">
             <h2 className="text-2xl font-bold text-gray-900 mb-6">Classement</h2>
             <AnimatedLeaderboard players={players} />

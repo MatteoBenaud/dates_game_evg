@@ -37,6 +37,7 @@ export default function PlayerPage() {
   const gameId = params.gameId as string
 
   const [pseudo, setPseudo] = useState('')
+  const [avatarUrl, setAvatarUrl] = useState('')
   const [hasJoined, setHasJoined] = useState(false)
   const [playerId, setPlayerId] = useState<string | null>(null)
   const [game, setGame] = useState<Game | null>(null)
@@ -167,6 +168,19 @@ export default function PlayerPage() {
     setError('')
 
     try {
+      // Check if host is ready
+      const { data: gameData } = await supabase
+        .from('games')
+        .select('host_ready')
+        .eq('id', gameId)
+        .single()
+
+      if (!gameData?.host_ready) {
+        setError('La partie n\'est pas encore ouverte. Attendez que l\'hôte lance la partie.')
+        setLoading(false)
+        return
+      }
+
       // Check if pseudo already taken
       const { data: existingPlayer } = await supabase
         .from('players')
@@ -188,6 +202,7 @@ export default function PlayerPage() {
           {
             game_id: gameId,
             pseudo: pseudo,
+            avatar_url: avatarUrl || null,
             total_score: 0,
             connected: true,
           },
@@ -207,6 +222,23 @@ export default function PlayerPage() {
     } finally {
       setLoading(false)
     }
+  }
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+
+    // Limit to 2MB
+    if (file.size > 2 * 1024 * 1024) {
+      setError('La photo doit faire moins de 2MB')
+      return
+    }
+
+    const reader = new FileReader()
+    reader.onloadend = () => {
+      setAvatarUrl(reader.result as string)
+    }
+    reader.readAsDataURL(file)
   }
 
   const handleSubmitAnswer = async (e: React.FormEvent) => {
@@ -267,6 +299,32 @@ export default function PlayerPage() {
                 className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent text-lg"
                 required
               />
+            </div>
+
+            <div>
+              <label className="block text-gray-700 font-medium mb-2">
+                Ajoute une photo (optionnel)
+              </label>
+              <div className="flex items-center gap-4">
+                {avatarUrl && (
+                  <div className="w-20 h-20 rounded-full overflow-hidden border-4 border-purple-500 flex-shrink-0">
+                    <img src={avatarUrl} alt="Avatar" className="w-full h-full object-cover" />
+                  </div>
+                )}
+                <label className="flex-1 cursor-pointer">
+                  <div className="w-full px-4 py-3 border-2 border-dashed border-gray-300 rounded-lg hover:border-purple-500 transition-colors text-center">
+                    <span className="text-gray-600">
+                      {avatarUrl ? 'Changer la photo' : 'Choisir une photo'}
+                    </span>
+                  </div>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={handleFileChange}
+                    className="hidden"
+                  />
+                </label>
+              </div>
             </div>
 
             <button
