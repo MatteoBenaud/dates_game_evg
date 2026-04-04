@@ -75,71 +75,101 @@ export default function Home() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center p-4">
-      <div className="max-w-md w-full space-y-8 bg-white rounded-2xl shadow-2xl p-8">
-        <div className="text-center">
-          <h1 className="text-4xl font-bold text-gray-900 mb-2">
-            Jeu de Dates
+    <main className="app-shell overflow-hidden px-4 py-8 md:px-8 md:py-10">
+      <div className="floating-orb left-[8%] top-24 h-32 w-32 bg-[rgba(216,87,42,0.18)]" />
+      <div className="floating-orb right-[12%] top-40 h-40 w-40 bg-[rgba(15,118,110,0.18)]" />
+      <div className="mx-auto grid min-h-[calc(100vh-4rem)] max-w-7xl items-center gap-8 lg:grid-cols-[1.1fr_0.9fr]">
+        <section className="relative">
+          <div className="mb-8 inline-flex items-center gap-3 rounded-full border border-[var(--line-strong)] bg-white/60 px-4 py-2 text-sm font-semibold text-[var(--ink-2)] backdrop-blur">
+            <span className="h-2.5 w-2.5 rounded-full bg-[var(--brand)]" />
+            Soiree multijoueur en direct
+          </div>
+          <h1 className="section-title display-font max-w-3xl text-5xl font-black leading-[0.95] text-[var(--ink-1)] md:text-7xl">
+            Faites deviner l’histoire
+            <span className="block text-[var(--brand)]">une date a la fois.</span>
           </h1>
-          <p className="text-gray-600">
-            Devine les dates, gagne des points !
+          <p className="mt-6 max-w-2xl text-lg leading-8 text-[var(--ink-2)] md:text-xl">
+            Cree une partie, lance les questions depuis l’ecran host et laisse les joueurs viser la date la plus proche.
+            L’interface est pensee pour une salle, un ecran partage et des reponses en direct.
           </p>
-        </div>
-
-        {error && (
-          <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg">
-            {error}
+          <div className="mt-10 grid gap-4 sm:grid-cols-3">
+            {[
+              ['Temps reel', 'Admin, host et joueurs synchronises'],
+              ['Scores lisibles', 'Classement instantane apres chaque reveal'],
+              ['Setup simple', 'Un code, un lien, la partie commence'],
+            ].map(([title, text]) => (
+              <div key={title} className="soft-panel rounded-[24px] p-5">
+                <p className="text-sm font-black uppercase tracking-[0.24em] text-[var(--ink-3)]">{title}</p>
+                <p className="mt-3 text-sm leading-6 text-[var(--ink-2)]">{text}</p>
+              </div>
+            ))}
           </div>
-        )}
+        </section>
 
-        <div className="space-y-6">
-          {/* Create Game */}
-          <div className="space-y-3">
-            <button
-              onClick={handleCreateGame}
-              disabled={loading}
-              className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-4 px-6 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-lg"
-            >
-              {loading ? 'Création...' : 'Créer une partie'}
-            </button>
-            <p className="text-sm text-gray-500 text-center">
-              Pour organiser une soirée
+        <section className="glass-panel relative rounded-[32px] p-6 sm:p-8">
+          <div className="absolute right-6 top-6 rounded-full bg-[var(--accent-soft)] px-3 py-1 text-xs font-black uppercase tracking-[0.24em] text-[var(--accent)]">
+            Live room
+          </div>
+          <div className="mb-8">
+            <p className="text-sm font-black uppercase tracking-[0.28em] text-[var(--ink-3)]">Jeu de Dates</p>
+            <h2 className="section-title mt-3 text-4xl font-black text-[var(--ink-1)]">Choisir une entree</h2>
+            <p className="mt-3 text-[15px] leading-7 text-[var(--ink-2)]">
+              Lancement cote host, connexion cote player. Meme partie, deux rythmes.
             </p>
           </div>
 
-          <div className="relative">
-            <div className="absolute inset-0 flex items-center">
-              <div className="w-full border-t border-gray-300"></div>
+          {error && (
+            <div className="mb-6 rounded-[24px] border border-red-200 bg-[var(--danger-soft)] px-5 py-4 text-sm font-medium text-red-800">
+              {error}
             </div>
-            <div className="relative flex justify-center text-sm">
-              <span className="px-2 bg-white text-gray-500">ou</span>
-            </div>
-          </div>
+          )}
 
-          {/* Join Game */}
-          <form onSubmit={handleJoinGame} className="space-y-3">
-            <input
-              type="text"
-              placeholder="Code à 6 chiffres"
-              value={gameCode}
-              onChange={(e) => setGameCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
-              maxLength={6}
-              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent text-center text-2xl font-mono tracking-wider"
-              required
-            />
-            <button
-              type="submit"
-              disabled={loading || gameCode.length !== 6}
-              className="w-full bg-purple-600 hover:bg-purple-700 text-white font-semibold py-4 px-6 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-lg"
-            >
-              {loading ? 'Connexion...' : 'Rejoindre une partie'}
-            </button>
-            <p className="text-sm text-gray-500 text-center">
-              Pour jouer avec tes amis
-            </p>
-          </form>
-        </div>
+          <div className="space-y-6">
+            <div className="soft-panel rounded-[28px] p-5">
+              <p className="text-xs font-black uppercase tracking-[0.28em] text-[var(--ink-3)]">Organiser</p>
+              <h3 className="mt-2 text-2xl font-black text-[var(--ink-1)]">Creer une nouvelle partie</h3>
+              <p className="mt-2 text-sm leading-6 text-[var(--ink-2)]">Installe le salon, prepare les questions puis ouvre l’ecran host.</p>
+              <button
+                onClick={handleCreateGame}
+                disabled={loading}
+                className="action-primary mt-5 w-full rounded-[20px] px-6 py-4 text-lg font-bold transition-transform hover:-translate-y-0.5 disabled:opacity-50"
+              >
+                {loading ? 'Creation...' : 'Creer une partie'}
+              </button>
+            </div>
+
+            <div className="relative text-center">
+              <div className="absolute inset-x-0 top-1/2 border-t border-[var(--line-soft)]" />
+              <span className="relative inline-block rounded-full bg-[var(--surface-0)] px-4 text-xs font-black uppercase tracking-[0.32em] text-[var(--ink-3)]">
+                ou
+              </span>
+            </div>
+
+            <form onSubmit={handleJoinGame} className="soft-panel rounded-[28px] p-5">
+              <p className="text-xs font-black uppercase tracking-[0.28em] text-[var(--ink-3)]">Jouer</p>
+              <h3 className="mt-2 text-2xl font-black text-[var(--ink-1)]">Rejoindre avec un code</h3>
+              <div className="mt-5 rounded-[22px] border border-[var(--line-soft)] bg-white/90 p-3">
+                <input
+                  type="text"
+                  placeholder="000000"
+                  value={gameCode}
+                  onChange={(e) => setGameCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                  maxLength={6}
+                  className="w-full bg-transparent px-3 py-4 text-center font-mono text-4xl font-black tracking-[0.5em] text-[var(--ink-1)] outline-none placeholder:text-[var(--ink-3)]"
+                  required
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={loading || gameCode.length !== 6}
+                className="action-secondary mt-5 w-full rounded-[20px] px-6 py-4 text-lg font-bold transition-transform hover:-translate-y-0.5 disabled:opacity-50"
+              >
+                {loading ? 'Connexion...' : 'Rejoindre la partie'}
+              </button>
+            </form>
+          </div>
+        </section>
       </div>
-    </div>
+    </main>
   )
 }

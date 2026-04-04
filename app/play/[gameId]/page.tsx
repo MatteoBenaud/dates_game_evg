@@ -1,9 +1,10 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { useParams } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import { GameStatus, QuestionStatus } from '@/types/game.types'
+import { formatScore } from '@/utils/score'
 
 interface Game {
   id: string
@@ -32,6 +33,60 @@ interface Answer {
   score: number | null
 }
 
+interface RealtimeGameChange {
+  status?: GameStatus
+  current_question_index?: number
+}
+
+interface RealtimeQuestionChange {
+  question_id?: string
+}
+
+interface RealtimePlayerChange {
+  player_id?: string
+}
+
+const MAX_AVATAR_BYTES = 2 * 1024 * 1024
+const MAX_AVATAR_DIMENSION = 1200
+
+async function compressAvatar(file: File): Promise<string> {
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(reader.result as string)
+    reader.onerror = () => reject(new Error('Impossible de lire le fichier'))
+    reader.readAsDataURL(file)
+  })
+
+  const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+    const img = new Image()
+    img.onload = () => resolve(img)
+    img.onerror = () => reject(new Error('Impossible de charger l’image'))
+    img.src = dataUrl
+  })
+
+  const scale = Math.min(1, MAX_AVATAR_DIMENSION / Math.max(image.width, image.height))
+  const canvas = document.createElement('canvas')
+  canvas.width = Math.max(1, Math.round(image.width * scale))
+  canvas.height = Math.max(1, Math.round(image.height * scale))
+
+  const context = canvas.getContext('2d')
+  if (!context) {
+    throw new Error('Canvas indisponible')
+  }
+
+  context.drawImage(image, 0, 0, canvas.width, canvas.height)
+
+  let quality = 0.9
+  let compressed = canvas.toDataURL('image/jpeg', quality)
+
+  while (compressed.length > MAX_AVATAR_BYTES * 1.37 && quality > 0.4) {
+    quality -= 0.1
+    compressed = canvas.toDataURL('image/jpeg', quality)
+  }
+
+  return compressed
+}
+
 export default function PlayerPage() {
   const params = useParams()
   const gameId = params.gameId as string
@@ -49,31 +104,33 @@ export default function PlayerPage() {
   const [allPlayers, setAllPlayers] = useState<Player[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const playerIdRef = useRef<string | null>(null)
+  const currentQuestionIndexRef = useRef(0)
+  const currentQuestionIdRef = useRef<string | null>(null)
 
   useEffect(() => {
-    // Check if player already joined (using localStorage)
-    const savedPlayerId = localStorage.getItem(`player_${gameId}`)
-    if (savedPlayerId) {
-      setPlayerId(savedPlayerId)
-      setHasJoined(true)
-      loadGame()
-    }
+    playerIdRef.current = playerId
+  }, [playerId])
+
+  useEffect(() => {
+    currentQuestionIndexRef.current = currentQuestionIndex
+  }, [currentQuestionIndex])
+
+  useEffect(() => {
+    currentQuestionIdRef.current = currentQuestion?.id ?? null
+  }, [currentQuestion])
+
+  const loadPlayers = useCallback(async () => {
+    const { data } = await supabase
+      .from('players')
+      .select('*')
+      .eq('game_id', gameId)
+      .order('total_score', { ascending: true })
+
+    setAllPlayers(data || [])
   }, [gameId])
 
-  useEffect(() => {
-    if (hasJoined && game) {
-      const cleanup = setupRealtimeSubscriptions()
-      return cleanup
-    }
-  }, [hasJoined, game])
-
-  useEffect(() => {
-    if (game && game.current_question_index >= 0) {
-      loadCurrentQuestion()
-    }
-  }, [game?.current_question_index])
-
-  const loadGame = async () => {
+  const loadGame = useCallback(async () => {
     try {
       const { data: gameData, error: gameError } = await supabase
         .from('games')
@@ -84,25 +141,15 @@ export default function PlayerPage() {
       if (gameError) throw gameError
 
       setGame(gameData as Game)
-      loadPlayers()
+      setGameStatus(gameData.status as GameStatus)
+      setCurrentQuestionIndex(gameData.current_question_index)
+      await loadPlayers()
     } catch (error) {
       console.error('Error loading game:', error)
     }
-  }
+  }, [gameId, loadPlayers])
 
-  const loadPlayers = async () => {
-    const { data } = await supabase
-      .from('players')
-      .select('*')
-      .eq('game_id', gameId)
-      .order('total_score', { ascending: true })
-
-    setAllPlayers(data || [])
-  }
-
-  const loadCurrentQuestion = async () => {
-    if (!game) return
-
+  const loadCurrentQuestion = useCallback(async () => {
     try {
       const { data: questions } = await supabase
         .from('questions')
@@ -110,8 +157,10 @@ export default function PlayerPage() {
         .eq('game_id', gameId)
         .order('question_number', { ascending: true })
 
-      if (questions && questions[game.current_question_index]) {
-        const question = questions[game.current_question_index]
+      const nextQuestion = questions?.[currentQuestionIndexRef.current]
+
+      if (nextQuestion) {
+        const question = nextQuestion
 
         // Only include correct_date if revealed
         setCurrentQuestion({
@@ -123,43 +172,51 @@ export default function PlayerPage() {
         })
 
         // Load my answer if exists
-        if (playerId) {
+        if (playerIdRef.current) {
           const { data: answerData } = await supabase
             .from('answers')
             .select('*')
             .eq('question_id', question.id)
-            .eq('player_id', playerId)
+            .eq('player_id', playerIdRef.current)
             .single()
 
           setMyAnswer(answerData || null)
         }
+      } else {
+        setCurrentQuestion(null)
+        setMyAnswer(null)
       }
     } catch (error) {
       console.error('Error loading question:', error)
     }
-  }
+  }, [gameId])
 
-  const setupRealtimeSubscriptions = () => {
+  const setupRealtimeSubscriptions = useCallback(() => {
+    console.log('[Realtime] Setting up subscriptions for game:', gameId)
+
     const channel = supabase
       .channel(`player:${gameId}`)
       .on(
         'postgres_changes',
         { event: 'UPDATE', schema: 'public', table: 'games', filter: `id=eq.${gameId}` },
-        (payload) => {
+        (payload: { new: RealtimeGameChange }) => {
+          console.log('[Realtime] Game update received:', payload)
           // Update only game status locally without reload
           if (payload.new.status) {
+            console.log('[Realtime] Updating status to:', payload.new.status)
             setGameStatus(payload.new.status as GameStatus)
           }
           if (payload.new.current_question_index !== undefined) {
+            console.log('[Realtime] Updating question index to:', payload.new.current_question_index)
             setCurrentQuestionIndex(payload.new.current_question_index)
-            loadCurrentQuestion()
           }
         }
       )
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'questions', filter: `game_id=eq.${gameId}` },
-        () => {
+        (payload: unknown) => {
+          console.log('[Realtime] Question change received:', payload)
           // Only reload current question
           loadCurrentQuestion()
         }
@@ -167,17 +224,64 @@ export default function PlayerPage() {
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'players', filter: `game_id=eq.${gameId}` },
-        () => {
+        (payload: unknown) => {
+          console.log('[Realtime] Player change received:', payload)
           // Only reload players list
           loadPlayers()
         }
       )
-      .subscribe()
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'answers' },
+        (payload: { new: RealtimeQuestionChange & RealtimePlayerChange; old: RealtimeQuestionChange & RealtimePlayerChange }) => {
+          const currentQuestionId = currentQuestionIdRef.current
+          const currentPlayerId = playerIdRef.current
+          const changedQuestionId = payload.new?.question_id ?? payload.old?.question_id
+          const changedPlayerId = payload.new?.player_id ?? payload.old?.player_id
+
+          if (
+            (currentQuestionId && changedQuestionId === currentQuestionId) ||
+            (currentPlayerId && changedPlayerId === currentPlayerId)
+          ) {
+            console.log('[Realtime] Answer change received:', payload)
+            loadCurrentQuestion()
+          }
+        }
+      )
+      .subscribe((status) => {
+        console.log('[Realtime] Subscription status:', status)
+      })
 
     return () => {
+      console.log('[Realtime] Unsubscribing from channel')
       channel.unsubscribe()
     }
-  }
+  }, [gameId, loadCurrentQuestion, loadPlayers])
+
+  useEffect(() => {
+    // Check if player already joined (using localStorage)
+    const savedPlayerId = localStorage.getItem(`player_${gameId}`)
+    if (savedPlayerId) {
+      setPlayerId(savedPlayerId)
+      setHasJoined(true)
+      loadGame()
+    }
+  }, [gameId, loadGame])
+
+  useEffect(() => {
+    console.log('[useEffect] currentQuestionIndex changed:', currentQuestionIndex, 'game:', game)
+    if (game && currentQuestionIndex >= 0) {
+      console.log('[useEffect] Loading current question...')
+      loadCurrentQuestion()
+    }
+  }, [currentQuestionIndex, game, loadCurrentQuestion])
+
+  useEffect(() => {
+    if (hasJoined) {
+      const cleanup = setupRealtimeSubscriptions()
+      return cleanup
+    }
+  }, [hasJoined, setupRealtimeSubscriptions])
 
   const handleJoin = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -245,17 +349,16 @@ export default function PlayerPage() {
     const file = e.target.files?.[0]
     if (!file) return
 
-    // Limit to 2MB
-    if (file.size > 2 * 1024 * 1024) {
-      setError('La photo doit faire moins de 2MB')
-      return
-    }
+    setError('')
 
-    const reader = new FileReader()
-    reader.onloadend = () => {
-      setAvatarUrl(reader.result as string)
-    }
-    reader.readAsDataURL(file)
+    compressAvatar(file)
+      .then((compressed) => {
+        setAvatarUrl(compressed)
+      })
+      .catch((error) => {
+        console.error('Error compressing avatar:', error)
+        setError('Impossible de traiter cette photo')
+      })
   }
 
   const handleSubmitAnswer = async (e: React.FormEvent) => {
@@ -290,21 +393,22 @@ export default function PlayerPage() {
   // Join screen
   if (!hasJoined) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-purple-500 to-pink-600 flex items-center justify-center p-4">
-        <div className="max-w-md w-full bg-white rounded-2xl shadow-2xl p-8">
-          <h1 className="text-3xl font-bold text-gray-900 mb-6 text-center">
+      <div className="app-shell flex min-h-screen items-center justify-center p-4">
+        <div className="glass-panel w-full max-w-md rounded-[32px] p-8">
+          <p className="mb-3 text-center text-xs font-black uppercase tracking-[0.3em] text-[var(--ink-3)]">Player access</p>
+          <h1 className="section-title mb-6 text-center text-4xl font-black text-[var(--ink-1)]">
             Rejoindre la partie
           </h1>
 
           {error && (
-            <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg mb-4">
+            <div className="mb-4 rounded-[20px] border border-red-200 bg-[var(--danger-soft)] px-4 py-3 text-red-800">
               {error}
             </div>
           )}
 
           <form onSubmit={handleJoin} className="space-y-4">
             <div>
-              <label className="block text-gray-700 font-medium mb-2">
+              <label className="mb-2 block text-sm font-black uppercase tracking-[0.2em] text-[var(--ink-3)]">
                 Entre ton pseudo
               </label>
               <input
@@ -313,24 +417,24 @@ export default function PlayerPage() {
                 onChange={(e) => setPseudo(e.target.value)}
                 placeholder="Ton pseudo"
                 maxLength={20}
-                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent text-lg"
+                className="w-full rounded-[20px] border border-[var(--line-soft)] bg-white/85 px-4 py-4 text-lg text-[var(--ink-1)] outline-none"
                 required
               />
             </div>
 
             <div>
-              <label className="block text-gray-700 font-medium mb-2">
+              <label className="mb-2 block text-sm font-black uppercase tracking-[0.2em] text-[var(--ink-3)]">
                 Ajoute une photo (optionnel)
               </label>
               <div className="flex items-center gap-4">
                 {avatarUrl && (
-                  <div className="w-20 h-20 rounded-full overflow-hidden border-4 border-purple-500 flex-shrink-0">
+                  <div className="h-20 w-20 flex-shrink-0 overflow-hidden rounded-full border-4 border-[var(--brand)]">
                     <img src={avatarUrl} alt="Avatar" className="w-full h-full object-cover" />
                   </div>
                 )}
                 <label className="flex-1 cursor-pointer">
-                  <div className="w-full px-4 py-3 border-2 border-dashed border-gray-300 rounded-lg hover:border-purple-500 transition-colors text-center">
-                    <span className="text-gray-600">
+                  <div className="w-full rounded-[20px] border-2 border-dashed border-[var(--line-strong)] bg-white/75 px-4 py-4 text-center transition-colors hover:border-[var(--brand)]">
+                    <span className="text-[var(--ink-2)]">
                       {avatarUrl ? 'Changer la photo' : 'Choisir une photo'}
                     </span>
                   </div>
@@ -347,7 +451,7 @@ export default function PlayerPage() {
             <button
               type="submit"
               disabled={loading || !pseudo.trim()}
-              className="w-full bg-purple-600 hover:bg-purple-700 text-white font-semibold py-4 px-6 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-lg"
+              className="action-primary w-full rounded-[20px] px-6 py-4 text-lg font-black uppercase tracking-[0.14em] disabled:opacity-50"
             >
               {loading ? 'Connexion...' : 'Rejoindre'}
             </button>
@@ -358,25 +462,27 @@ export default function PlayerPage() {
   }
 
   // Waiting for game to start
-  if (game?.status === 'waiting') {
+  if (gameStatus === 'waiting') {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-purple-500 to-pink-600 flex items-center justify-center p-4">
-        <div className="max-w-md w-full bg-white rounded-2xl shadow-2xl p-8 text-center">
+      <div className="app-shell flex min-h-screen items-center justify-center p-4">
+        <div className="glass-panel w-full max-w-md rounded-[32px] p-8 text-center">
           <div className="mb-6">
-            <div className="w-20 h-20 border-4 border-purple-600 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
-            <h1 className="text-2xl font-bold text-gray-900 mb-2">
+            <div className="mx-auto mb-4 h-20 w-20 rounded-full border-4 border-[var(--brand)] border-t-transparent animate-spin"></div>
+            <h1 className="section-title mb-2 text-3xl font-black text-[var(--ink-1)]">
               En attente du démarrage...
             </h1>
-            <p className="text-gray-600">
+            <p className="text-[var(--ink-2)]">
               La partie commencera bientôt
             </p>
           </div>
 
-          <div className="bg-gray-50 rounded-lg p-4">
-            <p className="text-sm text-gray-600 mb-2">Joueurs connectés ({allPlayers.length})</p>
-            <div className="space-y-1">
+          <div className="metric-card rounded-[24px] p-4">
+            <p className="mb-3 text-sm font-black uppercase tracking-[0.22em] text-[var(--ink-3)]">
+              Joueurs connectés ({allPlayers.length})
+            </p>
+            <div className="space-y-2">
               {allPlayers.map((player) => (
-                <div key={player.id} className="text-gray-900 font-medium">
+                <div key={player.id} className="rounded-full bg-white/75 px-4 py-2 font-bold text-[var(--ink-1)]">
                   {player.pseudo}
                 </div>
               ))}
@@ -388,37 +494,37 @@ export default function PlayerPage() {
   }
 
   // Game finished
-  if (game?.status === 'finished') {
+  if (gameStatus === 'finished') {
     const myPlayerData = allPlayers.find(p => p.id === playerId)
     const myRank = allPlayers.findIndex(p => p.id === playerId) + 1
 
     return (
-      <div className="min-h-screen bg-gradient-to-br from-yellow-400 to-orange-500 flex items-center justify-center p-4">
-        <div className="max-w-md w-full bg-white rounded-2xl shadow-2xl p-8">
-          <h1 className="text-3xl font-bold text-gray-900 mb-6 text-center">
+      <div className="app-shell flex min-h-screen items-center justify-center p-4">
+        <div className="glass-panel w-full max-w-md rounded-[32px] p-8">
+          <h1 className="section-title mb-6 text-center text-4xl font-black text-[var(--ink-1)]">
             Partie terminée !
           </h1>
 
-          <div className="bg-gradient-to-r from-purple-500 to-pink-600 text-white rounded-xl p-6 mb-6 text-center">
-            <p className="text-lg mb-2">Ta position</p>
-            <p className="text-5xl font-bold mb-2">#{myRank}</p>
-            <p className="text-xl">{myPlayerData?.total_score} points</p>
+          <div className="mb-6 rounded-[28px] bg-gradient-to-br from-[var(--brand)] to-[var(--brand-strong)] p-6 text-center text-white shadow-xl">
+            <p className="text-sm font-black uppercase tracking-[0.28em] text-white/75">Ta position</p>
+            <p className="mt-2 text-5xl font-black">#{myRank}</p>
+            <p className="mt-2 text-xl">{formatScore(myPlayerData?.total_score)}</p>
           </div>
 
           <div className="space-y-3">
-            <h2 className="text-xl font-bold text-gray-900">Classement final</h2>
+            <h2 className="section-title text-2xl font-black text-[var(--ink-1)]">Classement final</h2>
             {allPlayers.map((player, index) => (
               <div
                 key={player.id}
-                className={`flex items-center justify-between p-3 rounded-lg ${
-                  player.id === playerId ? 'bg-purple-100 border-2 border-purple-500' : 'bg-gray-50'
+                className={`flex items-center justify-between rounded-[18px] p-4 ${
+                  player.id === playerId ? 'border-2 border-[var(--brand)] bg-[rgba(216,87,42,0.12)]' : 'bg-white/75'
                 }`}
               >
                 <div className="flex items-center gap-3">
-                  <span className="text-xl font-bold text-gray-400">#{index + 1}</span>
-                  <span className="font-semibold text-gray-900">{player.pseudo}</span>
+                  <span className="text-xl font-black text-[var(--ink-3)]">#{index + 1}</span>
+                  <span className="font-bold text-[var(--ink-1)]">{player.pseudo}</span>
                 </div>
-                <span className="font-bold text-gray-900">{player.total_score}</span>
+                <span className="font-black text-[var(--ink-1)]">{formatScore(player.total_score)}</span>
               </div>
             ))}
           </div>
@@ -430,8 +536,8 @@ export default function PlayerPage() {
   // Playing
   if (!currentQuestion) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-purple-500 to-pink-600 flex items-center justify-center p-4">
-        <div className="text-white text-2xl">Chargement...</div>
+      <div className="app-shell flex min-h-screen items-center justify-center p-4">
+        <div className="glass-panel rounded-[28px] px-8 py-6 text-2xl font-bold text-[var(--ink-1)]">Chargement...</div>
       </div>
     )
   }
@@ -439,27 +545,28 @@ export default function PlayerPage() {
   const questionStatus = currentQuestion.status
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-purple-500 to-pink-600 p-4">
+    <div className="app-shell p-4">
       <div className="max-w-md mx-auto pt-8">
-        <div className="bg-white rounded-2xl shadow-2xl p-6 mb-4">
+        <div className="glass-panel mb-4 rounded-[32px] p-6">
           <div className="flex justify-between items-center mb-4">
-            <span className="text-sm font-medium text-gray-600">
+            <span className="text-sm font-black uppercase tracking-[0.18em] text-[var(--ink-3)]">
               Question {currentQuestion.question_number} / 10
             </span>
-            <span className="text-sm font-medium text-gray-600">
-              Score: {allPlayers.find(p => p.id === playerId)?.total_score || 0}
+            <span className="text-sm font-black uppercase tracking-[0.18em] text-[var(--ink-3)]">
+              Score: {formatScore(allPlayers.find(p => p.id === playerId)?.total_score)}
             </span>
           </div>
 
-          <div className="bg-purple-50 border-2 border-purple-500 rounded-xl p-4 mb-6">
-            <p className="text-lg font-semibold text-gray-900">{currentQuestion.text}</p>
+          <div className="metric-card mb-6 rounded-[24px] p-4">
+            <p className="text-[11px] font-black uppercase tracking-[0.28em] text-[var(--ink-3)]">Question</p>
+            <p className="mt-3 text-xl font-black text-[var(--ink-1)]">{currentQuestion.text}</p>
           </div>
 
           {/* Question locked */}
           {questionStatus === 'locked' && (
             <div className="text-center py-8">
-              <div className="w-16 h-16 border-4 border-purple-600 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
-              <p className="text-gray-600">En attente de la question...</p>
+              <div className="mx-auto mb-4 h-16 w-16 rounded-full border-4 border-[var(--brand)] border-t-transparent animate-spin"></div>
+              <p className="text-[var(--ink-2)]">En attente de la question...</p>
             </div>
           )}
 
@@ -467,14 +574,14 @@ export default function PlayerPage() {
           {questionStatus === 'open' && !myAnswer && (
             <form onSubmit={handleSubmitAnswer} className="space-y-4">
               <div>
-                <label className="block text-gray-700 font-medium mb-2">
+                <label className="mb-2 block text-sm font-black uppercase tracking-[0.2em] text-[var(--ink-3)]">
                   Sélectionne une date
                 </label>
                 <input
                   type="date"
                   value={selectedDate}
                   onChange={(e) => setSelectedDate(e.target.value)}
-                  className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent text-lg"
+                  className="w-full rounded-[20px] border border-[var(--line-soft)] bg-white/85 px-4 py-4 text-lg text-[var(--ink-1)] outline-none"
                   required
                 />
               </div>
@@ -482,7 +589,7 @@ export default function PlayerPage() {
               <button
                 type="submit"
                 disabled={loading || !selectedDate}
-                className="w-full bg-purple-600 hover:bg-purple-700 text-white font-semibold py-4 px-6 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-lg"
+                className="action-primary w-full rounded-[20px] px-6 py-4 text-lg font-black uppercase tracking-[0.14em] disabled:opacity-50"
               >
                 {loading ? 'Envoi...' : 'Valider ma réponse'}
               </button>
@@ -492,25 +599,25 @@ export default function PlayerPage() {
           {/* Answer submitted, waiting for reveal */}
           {questionStatus === 'open' && myAnswer && (
             <div className="text-center py-8">
-              <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
+              <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-emerald-100">
                 <svg className="w-10 h-10 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                 </svg>
               </div>
-              <p className="text-lg font-semibold text-gray-900 mb-2">Réponse enregistrée !</p>
-              <p className="text-gray-600 mb-4">
+              <p className="mb-2 text-lg font-black text-[var(--ink-1)]">Réponse enregistrée !</p>
+              <p className="mb-4 text-[var(--ink-2)]">
                 Ta réponse: {new Date(myAnswer.submitted_date).toLocaleDateString('fr-FR')}
               </p>
-              <p className="text-sm text-gray-500">En attente du reveal...</p>
+              <p className="text-sm text-[var(--ink-3)]">En attente du reveal...</p>
             </div>
           )}
 
           {/* Revealed */}
           {questionStatus === 'revealed' && (
             <div className="space-y-4">
-              <div className="bg-blue-50 border-2 border-blue-500 rounded-xl p-4">
-                <p className="text-sm text-gray-600 mb-1">Bonne réponse:</p>
-                <p className="text-xl font-bold text-gray-900">
+              <div className="metric-card rounded-[24px] p-4">
+                <p className="mb-1 text-sm font-black uppercase tracking-[0.2em] text-[var(--ink-3)]">Bonne réponse</p>
+                <p className="text-xl font-black text-[var(--ink-1)]">
                   {currentQuestion.correct_date &&
                     new Date(currentQuestion.correct_date).toLocaleDateString('fr-FR', {
                       year: 'numeric',
@@ -521,33 +628,33 @@ export default function PlayerPage() {
               </div>
 
               {myAnswer && (
-                <div className="bg-purple-50 border-2 border-purple-500 rounded-xl p-4">
-                  <p className="text-sm text-gray-600 mb-1">Ta réponse:</p>
-                  <p className="text-xl font-bold text-gray-900 mb-2">
+                <div className="rounded-[24px] border border-[var(--line-soft)] bg-[rgba(216,87,42,0.1)] p-4">
+                  <p className="mb-1 text-sm font-black uppercase tracking-[0.2em] text-[var(--ink-3)]">Ta réponse</p>
+                  <p className="mb-2 text-xl font-black text-[var(--ink-1)]">
                     {new Date(myAnswer.submitted_date).toLocaleDateString('fr-FR', {
                       year: 'numeric',
                       month: 'long',
                       day: 'numeric'
                     })}
                   </p>
-                  <p className="text-2xl font-bold text-purple-600">
-                    Écart: {myAnswer.score} jours
+                  <p className="text-2xl font-black text-[var(--brand)]">
+                    Écart: {formatScore(myAnswer.score)}
                   </p>
                 </div>
               )}
 
-              <div className="bg-gray-50 rounded-lg p-4">
-                <p className="text-sm text-gray-600 mb-2">Classement actuel</p>
+              <div className="metric-card rounded-[24px] p-4">
+                <p className="mb-2 text-sm font-black uppercase tracking-[0.2em] text-[var(--ink-3)]">Classement actuel</p>
                 <div className="space-y-2">
                   {allPlayers.slice(0, 5).map((player, index) => (
                     <div
                       key={player.id}
-                      className={`flex items-center justify-between ${
-                        player.id === playerId ? 'font-bold text-purple-600' : 'text-gray-700'
+                      className={`flex items-center justify-between rounded-full px-3 py-2 ${
+                        player.id === playerId ? 'bg-[rgba(216,87,42,0.14)] font-black text-[var(--brand)]' : 'bg-white/70 text-[var(--ink-2)]'
                       }`}
                     >
                       <span>#{index + 1} {player.pseudo}</span>
-                      <span>{player.total_score}</span>
+                      <span>{formatScore(player.total_score)}</span>
                     </div>
                   ))}
                 </div>

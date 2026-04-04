@@ -1,9 +1,10 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import { GameStatus, QuestionStatus } from '@/types/game.types'
+import { formatScore } from '@/utils/score'
 
 interface Game {
   id: string
@@ -53,39 +54,84 @@ export default function AdminGamePage() {
   const [newQuestionDate, setNewQuestionDate] = useState('')
   const [isAdding, setIsAdding] = useState(false)
 
-  useEffect(() => {
-    loadGame()
+  const loadGameMeta = useCallback(async () => {
+    const { data: gameData, error } = await supabase
+      .from('games')
+      .select('*')
+      .eq('id', gameId)
+      .single()
+
+    if (error) throw error
+
+    setGame(gameData ? { ...gameData, status: gameData.status as GameStatus } : null)
   }, [gameId])
 
-  const loadGame = async () => {
+  const loadPlayers = useCallback(async () => {
+    const { data: playersData, error } = await supabase
+      .from('players')
+      .select('*')
+      .eq('game_id', gameId)
+      .order('total_score', { ascending: true })
+
+    if (error) throw error
+
+    setPlayers(playersData || [])
+  }, [gameId])
+
+  const loadQuestions = useCallback(async () => {
+    const { data: questionsData, error } = await supabase
+      .from('questions')
+      .select('*')
+      .eq('game_id', gameId)
+      .order('question_number', { ascending: true })
+
+    if (error) throw error
+
+    setQuestions((questionsData || []).map(q => ({ ...q, status: q.status as QuestionStatus })))
+  }, [gameId])
+
+  const loadGame = useCallback(async () => {
     try {
-      const { data: gameData } = await supabase
-        .from('games')
-        .select('*')
-        .eq('id', gameId)
-        .single()
-
-      const { data: playersData } = await supabase
-        .from('players')
-        .select('*')
-        .eq('game_id', gameId)
-        .order('total_score', { ascending: true })
-
-      const { data: questionsData } = await supabase
-        .from('questions')
-        .select('*')
-        .eq('game_id', gameId)
-        .order('question_number', { ascending: true })
-
-      setGame(gameData ? { ...gameData, status: gameData.status as GameStatus } : null)
-      setPlayers(playersData || [])
-      setQuestions((questionsData || []).map(q => ({ ...q, status: q.status as QuestionStatus })))
-      setLoading(false)
+      await Promise.all([loadGameMeta(), loadPlayers(), loadQuestions()])
     } catch (error) {
       console.error('Error loading game:', error)
+    } finally {
       setLoading(false)
     }
-  }
+  }, [loadGameMeta, loadPlayers, loadQuestions])
+
+  useEffect(() => {
+    loadGame()
+
+    const channel = supabase
+      .channel(`admin:${gameId}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'games', filter: `id=eq.${gameId}` },
+        async () => {
+          await loadGameMeta()
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'players', filter: `game_id=eq.${gameId}` },
+        async () => {
+          await loadPlayers()
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'questions', filter: `game_id=eq.${gameId}` },
+        async () => {
+          await loadQuestions()
+        }
+      )
+      .subscribe()
+
+    return () => {
+      channel.unsubscribe()
+    }
+  }, [gameId, loadGame, loadGameMeta, loadPlayers, loadQuestions])
 
 
   const handleEditQuestion = (question: Question) => {
@@ -185,7 +231,7 @@ export default function AdminGamePage() {
     const csv = [
       ['Pseudo', 'Score Total', 'Date de participation'].join(','),
       ...players.map(p =>
-        [p.pseudo, p.total_score || 0, p.joined_at ? new Date(p.joined_at).toLocaleDateString('fr-FR') : 'N/A'].join(',')
+        [p.pseudo, formatScore(p.total_score), p.joined_at ? new Date(p.joined_at).toLocaleDateString('fr-FR') : 'N/A'].join(',')
       ),
     ].join('\n')
 

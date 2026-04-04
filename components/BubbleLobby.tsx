@@ -37,7 +37,7 @@ export default function BubbleLobby({ players }: BubbleLobbyProps) {
     const width = container.clientWidth
     const height = container.clientHeight
 
-    const newBubbles: Bubble[] = players.map((player, index) => {
+    const newBubbles: Bubble[] = players.map((player) => {
       // Find existing bubble for this player
       const existing = bubblesRef.current.find(b => b.id === player.id)
 
@@ -74,7 +74,8 @@ export default function BubbleLobby({ players }: BubbleLobbyProps) {
       const height = container.clientHeight
 
       const newBubbles = bubblesRef.current.map(bubble => {
-        let { x, y, vx, vy, radius } = bubble
+        let { x, y, vx, vy } = bubble
+        const { radius } = bubble
 
         // Update position
         x += vx
@@ -153,7 +154,7 @@ export default function BubbleLobby({ players }: BubbleLobbyProps) {
   return (
     <div
       ref={canvasRef}
-      className="relative w-full h-[500px] bg-gradient-to-br from-purple-100 via-pink-100 to-blue-100 rounded-2xl overflow-hidden shadow-inner"
+      className="relative h-[500px] w-full overflow-hidden rounded-[28px] border border-[var(--line-soft)] bg-gradient-to-br from-[rgba(255,251,245,0.95)] via-[rgba(250,241,229,0.9)] to-[rgba(221,240,236,0.92)] shadow-inner"
     >
       {bubbles.map((bubble) => (
         <div
@@ -167,10 +168,10 @@ export default function BubbleLobby({ players }: BubbleLobbyProps) {
         >
           <div className="relative">
             {/* Bubble glow effect */}
-            <div className="absolute inset-0 rounded-full bg-white opacity-30 blur-xl scale-150" />
+            <div className="absolute inset-0 scale-150 rounded-full bg-white opacity-30 blur-xl" />
 
             {/* Main bubble */}
-            <div className="relative w-32 h-32 rounded-full bg-gradient-to-br from-white to-purple-200 border-4 border-white shadow-2xl overflow-hidden flex items-center justify-center">
+            <div className="relative flex h-32 w-32 items-center justify-center overflow-hidden rounded-full border-4 border-white bg-gradient-to-br from-white to-[rgba(216,87,42,0.18)] shadow-2xl">
               {bubble.player.avatar_url ? (
                 <img
                   src={bubble.player.avatar_url}
@@ -178,7 +179,7 @@ export default function BubbleLobby({ players }: BubbleLobbyProps) {
                   className="w-full h-full object-cover"
                 />
               ) : (
-                <div className="w-full h-full bg-gradient-to-br from-purple-400 to-pink-400 flex items-center justify-center">
+                <div className="flex h-full w-full items-center justify-center bg-gradient-to-br from-[var(--brand)] to-[var(--brand-strong)]">
                   <span className="text-4xl font-bold text-white">
                     {bubble.player.pseudo.charAt(0).toUpperCase()}
                   </span>
@@ -191,15 +192,15 @@ export default function BubbleLobby({ players }: BubbleLobbyProps) {
 
             {/* Player name tag */}
             <div className="absolute -bottom-8 left-1/2 transform -translate-x-1/2 whitespace-nowrap">
-              <div className="bg-white px-4 py-2 rounded-full shadow-lg border-2 border-purple-300">
-                <span className="font-bold text-gray-800">{bubble.player.pseudo}</span>
+              <div className="rounded-full border-2 border-[rgba(216,87,42,0.18)] bg-white px-4 py-2 shadow-lg">
+                <span className="font-bold text-[var(--ink-1)]">{bubble.player.pseudo}</span>
               </div>
             </div>
 
             {/* Connection status indicator */}
             <div className="absolute top-0 right-0 w-6 h-6">
               <div className={`w-full h-full rounded-full border-2 border-white ${
-                bubble.player.connected ? 'bg-green-500' : 'bg-red-500'
+                bubble.player.connected ? 'bg-emerald-500' : 'bg-red-500'
               }`} />
             </div>
           </div>
@@ -210,8 +211,8 @@ export default function BubbleLobby({ players }: BubbleLobbyProps) {
       {bubbles.length === 0 && (
         <div className="absolute inset-0 flex items-center justify-center">
           <div className="text-center">
-            <div className="text-6xl mb-4">👥</div>
-            <p className="text-xl font-semibold text-gray-600">En attente des joueurs...</p>
+            <div className="mb-4 text-6xl">👥</div>
+            <p className="text-xl font-semibold text-[var(--ink-2)]">En attente des joueurs...</p>
           </div>
         </div>
       )}

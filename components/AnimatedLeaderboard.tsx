@@ -1,152 +1,99 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { formatScore } from '@/utils/score'
 
 interface Player {
   id: string
   pseudo: string
   total_score: number | null
+  avatar_url?: string | null
 }
 
 interface AnimatedLeaderboardProps {
   players: Player[]
-  maxScore?: number
 }
 
-interface PlayerPosition {
-  id: string
-  pseudo: string
-  score: number
-  rank: number
-  prevRank: number
-}
+export default function AnimatedLeaderboard({ players }: AnimatedLeaderboardProps) {
+  const sortedPlayers = [...players]
+    .map((player) => ({ ...player, total_score: player.total_score || 0 }))
+    .sort((a, b) => a.total_score - b.total_score)
 
-export default function AnimatedLeaderboard({ players, maxScore }: AnimatedLeaderboardProps) {
-  const [playerPositions, setPlayerPositions] = useState<PlayerPosition[]>([])
-  const [isFirstRender, setIsFirstRender] = useState(true)
-  const [animatedScores, setAnimatedScores] = useState<Record<string, number>>({})
-
-  useEffect(() => {
-    // Sort players by score (ascending = better)
-    const sortedPlayers = [...players]
-      .map(p => ({ ...p, total_score: p.total_score || 0 }))
-      .sort((a, b) => a.total_score - b.total_score)
-
-    // Calculate max score for bar sizing
-    const calculatedMaxScore = maxScore || Math.max(...sortedPlayers.map(p => p.total_score), 1)
-
-    // Create new positions
-    const newPositions: PlayerPosition[] = sortedPlayers.map((player, index) => {
-      const prevPlayer = playerPositions.find(p => p.id === player.id)
-      return {
-        id: player.id,
-        pseudo: player.pseudo,
-        score: player.total_score,
-        rank: index,
-        prevRank: prevPlayer?.rank ?? index,
-      }
-    })
-
-    setPlayerPositions(newPositions)
-
-    // Animate scores from previous value to new value
-    newPositions.forEach((player) => {
-      const prevScore = animatedScores[player.id] || 0
-      if (prevScore !== player.score) {
-        // Start from previous score
-        setAnimatedScores(prev => ({ ...prev, [player.id]: prevScore }))
-
-        // Animate to new score after a tiny delay
-        setTimeout(() => {
-          setAnimatedScores(prev => ({ ...prev, [player.id]: player.score }))
-        }, 50)
-      }
-    })
-
-    if (isFirstRender) {
-      setIsFirstRender(false)
-    }
-  }, [players])
-
-  if (playerPositions.length === 0) {
+  if (sortedPlayers.length === 0) {
     return <p className="text-gray-500 text-center py-8">Aucun joueur</p>
   }
 
-  const maxScoreValue = Math.max(...playerPositions.map(p => p.score), 1)
+  const maxScoreValue = Math.max(...sortedPlayers.map((player) => player.total_score), 1)
+  const getRankLabel = (index: number) => {
+    if (index === 0) return 'Tête du classement'
+    if (index === 1) return 'Très proche'
+    if (index === 2) return 'Podium'
+    return 'En chasse'
+  }
 
   return (
-    <div className="space-y-3">
-      {playerPositions.map((player, index) => {
-        const currentAnimatedScore = animatedScores[player.id] ?? player.score
-        const barWidth = (currentAnimatedScore / maxScoreValue) * 100
-        const rankChange = player.prevRank - player.rank
+    <div className="space-y-4">
+      {sortedPlayers.map((player, index) => {
+        const score = player.total_score
+        const progress = maxScoreValue === 0 ? 0 : Math.max(12, (score / maxScoreValue) * 100)
+        const rankTones = [
+          'from-amber-300 via-amber-400 to-orange-500',
+          'from-slate-200 via-slate-300 to-slate-400',
+          'from-orange-300 via-amber-500 to-orange-600',
+        ]
+        const rankGradient = rankTones[index] || 'from-sky-300 via-cyan-400 to-teal-500'
+        const cardHighlight = index === 0
+          ? 'border-amber-300/80 bg-gradient-to-r from-amber-50 to-orange-50'
+          : 'border-[var(--line-soft)] bg-white/75'
 
-        // Medal colors for top 3
-        const getRankColor = (rank: number) => {
-          if (rank === 0) return 'from-yellow-400 to-yellow-500' // Gold
-          if (rank === 1) return 'from-gray-300 to-gray-400' // Silver
-          if (rank === 2) return 'from-orange-400 to-orange-500' // Bronze
-          return 'from-blue-400 to-blue-500'
-        }
-
-        const getRankBadge = (rank: number) => {
-          if (rank === 0) return '🥇'
-          if (rank === 1) return '🥈'
-          if (rank === 2) return '🥉'
-          return `#${rank + 1}`
+        const badge = () => {
+          if (index === 0) return '01'
+          if (index === 1) return '02'
+          if (index === 2) return '03'
+          return `${index + 1}`.padStart(2, '0')
         }
 
         return (
           <div
             key={player.id}
-            className="relative"
-            style={{
-              transform: `translateY(${(player.rank - player.prevRank) * 0}px)`,
-              transition: 'all 0.8s cubic-bezier(0.34, 1.56, 0.64, 1)',
-            }}
+            className={`soft-panel rounded-[28px] border p-4 transition-all duration-500 ${cardHighlight}`}
           >
-            <div className="flex items-center gap-3">
-              {/* Rank badge */}
-              <div className="flex items-center justify-center w-12 h-12 rounded-full bg-gray-100 font-bold text-lg shrink-0">
-                {getRankBadge(player.rank)}
+            <div className="flex items-center gap-4">
+              <div className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br text-lg font-black text-white shadow-lg ${rankGradient}`}>
+                {badge()}
               </div>
-
-              {/* Player info and bar */}
-              <div className="flex-1 relative">
-                <div className="flex items-center justify-between mb-1">
-                  <div className="flex items-center gap-2">
-                    <span className="font-semibold text-gray-900">{player.pseudo}</span>
-
-                    {/* Rank change indicator */}
-                    {!isFirstRender && rankChange !== 0 && (
-                      <span
-                        className={`text-sm font-medium animate-bounce ${
-                          rankChange > 0 ? 'text-green-600' : 'text-red-600'
-                        }`}
-                      >
-                        {rankChange > 0 ? '↑' : '↓'} {Math.abs(rankChange)}
-                      </span>
-                    )}
+              <div className="h-14 w-14 shrink-0 overflow-hidden rounded-2xl border border-white/80 bg-white shadow-md">
+                {player.avatar_url ? (
+                  <img
+                    src={player.avatar_url}
+                    alt={player.pseudo}
+                    className="h-full w-full object-cover"
+                  />
+                ) : (
+                  <div className="flex h-full w-full items-center justify-center bg-gradient-to-br from-[var(--brand)] to-[var(--brand-strong)] text-lg font-black text-white">
+                    {player.pseudo.charAt(0).toUpperCase()}
                   </div>
-
-                  <span className="font-bold text-gray-900 tabular-nums">{Math.round(currentAnimatedScore)} pts</span>
+                )}
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="mb-2 flex items-start justify-between gap-4">
+                  <div>
+                    <p className="text-lg font-bold text-[var(--ink-1)]">{player.pseudo}</p>
+                    <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[var(--ink-3)]">
+                      {getRankLabel(index)}
+                    </p>
+                  </div>
+                  <div className="rounded-2xl bg-[var(--surface-0)] px-4 py-2 text-right">
+                    <p className="text-[10px] font-bold uppercase tracking-[0.28em] text-[var(--ink-3)]">Score</p>
+                    <p className="text-sm font-black tabular-nums text-[var(--ink-1)]">{formatScore(score)}</p>
+                  </div>
                 </div>
-
-                {/* Animated bar */}
-                <div className="relative h-8 bg-gray-100 rounded-full overflow-hidden">
+                <div className="h-4 overflow-hidden rounded-full bg-[rgba(23,32,51,0.08)]">
                   <div
-                    className={`h-full bg-gradient-to-r ${getRankColor(player.rank)} rounded-full transition-all duration-[5000ms] ease-out flex items-center justify-end pr-3`}
+                    className={`h-full rounded-full bg-gradient-to-r ${rankGradient} transition-all duration-700 ease-out`}
                     style={{
-                      width: `${barWidth}%`,
-                      minWidth: currentAnimatedScore > 0 ? '10%' : '0%',
+                      width: `${progress}%`,
                     }}
-                  >
-                    {currentAnimatedScore > 0 && (
-                      <span className="text-white font-bold text-sm drop-shadow-md tabular-nums">
-                        {Math.round(currentAnimatedScore)}
-                      </span>
-                    )}
-                  </div>
+                  />
                 </div>
               </div>
             </div>

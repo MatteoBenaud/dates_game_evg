@@ -14,6 +14,15 @@ interface GameWithStats {
   question_count: number
 }
 
+interface GamesWithStatsRow {
+  id: string
+  code: string
+  status: string
+  created_at: string | null
+  player_count: number
+  question_count: number
+}
+
 export default function AdminDashboard() {
   const router = useRouter()
   const [games, setGames] = useState<GameWithStats[]>([])
@@ -26,12 +35,10 @@ export default function AdminDashboard() {
 
   const loadGames = async () => {
     try {
-      // Single optimized query using database function
-      const { data: gamesData } = await supabase
-        .rpc('get_games_with_stats')
+      const { data: gamesData } = await supabase.rpc('get_games_with_stats')
 
       if (gamesData) {
-        const gamesWithStats = gamesData.map((game: any) => ({
+        const gamesWithStats = (gamesData as GamesWithStatsRow[]).map((game) => ({
           id: game.id,
           code: game.code,
           status: game.status as GameStatus,
@@ -64,13 +71,7 @@ export default function AdminDashboard() {
 
   const handleLaunchGame = async (gameId: string) => {
     try {
-      // Set host_ready to true when launching from admin
-      await supabase
-        .from('games')
-        .update({ host_ready: true })
-        .eq('id', gameId)
-
-      // Navigate to host page
+      await supabase.from('games').update({ host_ready: true }).eq('id', gameId)
       router.push(`/host/${gameId}`)
     } catch (error) {
       console.error('Error launching game:', error)
@@ -79,19 +80,16 @@ export default function AdminDashboard() {
 
   const handleDuplicateGame = async (gameId: string) => {
     try {
-      // Get original game questions
       const { data: questions } = await supabase
         .from('questions')
         .select('*')
         .eq('game_id', gameId)
         .order('question_number', { ascending: true })
 
-      // Generate new code
       const { data: newCode } = await supabase.rpc('generate_game_code')
 
       if (!newCode) throw new Error('Failed to generate game code')
 
-      // Create new game
       const { data: newGame, error: gameError } = await supabase
         .from('games')
         .insert([
@@ -106,7 +104,6 @@ export default function AdminDashboard() {
 
       if (gameError) throw gameError
 
-      // Duplicate questions
       if (questions) {
         const newQuestions = questions.map((q) => ({
           game_id: newGame.id,
@@ -127,173 +124,144 @@ export default function AdminDashboard() {
     }
   }
 
-  const filteredGames = games.filter((game) =>
-    filter === 'all' ? true : game.status === filter
-  )
+  const filteredGames = games.filter((game) => (filter === 'all' ? true : game.status === filter))
 
   const getStatusBadge = (status: GameStatus) => {
     const badges = {
-      waiting: 'bg-yellow-100 text-yellow-800',
-      started: 'bg-green-100 text-green-800',
-      finished: 'bg-gray-100 text-gray-800',
+      waiting: 'bg-amber-100 text-amber-900',
+      started: 'bg-emerald-100 text-emerald-900',
+      finished: 'bg-slate-200 text-slate-800',
     }
     const labels = {
       waiting: 'En attente',
       started: 'En cours',
       finished: 'Terminée',
     }
-    return (
-      <span className={`px-3 py-1 rounded-full text-sm font-medium ${badges[status]}`}>
-        {labels[status]}
-      </span>
-    )
+
+    return <span className={`status-pill ${badges[status]}`}>{labels[status]}</span>
   }
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-100">
-        <div className="text-2xl font-semibold text-gray-600">Chargement...</div>
+      <div className="app-shell flex min-h-screen items-center justify-center px-6">
+        <div className="glass-panel rounded-[32px] px-10 py-8 text-center">
+          <p className="section-title text-3xl font-black text-[var(--ink-1)]">Chargement du dashboard</p>
+          <p className="mt-3 text-[var(--ink-2)]">Récupération des parties et de leurs statistiques.</p>
+        </div>
       </div>
     )
   }
 
   return (
-    <div className="min-h-screen bg-gray-100 p-8">
-      <div className="max-w-7xl mx-auto">
-        {/* Header */}
-        <div className="mb-8">
-          <h1 className="text-4xl font-bold text-gray-900 mb-2">🎮 Admin - Jeu de Dates</h1>
-          <p className="text-gray-600">Gérez toutes vos parties en un coup d'œil</p>
+    <div className="app-shell px-4 py-6 md:px-8 md:py-8">
+      <div className="mx-auto max-w-7xl">
+        <div className="mb-8 grid gap-6 lg:grid-cols-[1.1fr_0.9fr]">
+          <div>
+            <p className="mb-3 text-sm font-black uppercase tracking-[0.28em] text-[var(--ink-3)]">Back office</p>
+            <h1 className="section-title text-5xl font-black text-[var(--ink-1)] md:text-6xl">Piloter toutes les parties.</h1>
+            <p className="mt-4 max-w-2xl text-lg leading-8 text-[var(--ink-2)]">
+              Visualise les salons, relance une session, duplique une sélection de questions et garde une vue nette sur l’état global.
+            </p>
+          </div>
+
+          <div className="glass-panel rounded-[30px] p-6">
+            <div className="grid grid-cols-3 gap-3 text-center">
+              <div className="metric-card rounded-[24px] p-4">
+                <p className="text-[11px] font-black uppercase tracking-[0.25em] text-[var(--ink-3)]">Total</p>
+                <p className="mt-2 text-3xl font-black text-[var(--ink-1)]">{games.length}</p>
+              </div>
+              <div className="metric-card rounded-[24px] p-4">
+                <p className="text-[11px] font-black uppercase tracking-[0.25em] text-[var(--ink-3)]">Actives</p>
+                <p className="mt-2 text-3xl font-black text-[var(--accent)]">{games.filter((g) => g.status === 'started').length}</p>
+              </div>
+              <div className="metric-card rounded-[24px] p-4">
+                <p className="text-[11px] font-black uppercase tracking-[0.25em] text-[var(--ink-3)]">Questions</p>
+                <p className="mt-2 text-3xl font-black text-[var(--brand)]">{games.reduce((sum, game) => sum + game.question_count, 0)}</p>
+              </div>
+            </div>
+          </div>
         </div>
 
-        {/* Actions & Filters */}
-        <div className="bg-white rounded-xl shadow-lg p-6 mb-6">
-          <div className="flex items-center justify-between">
-            <div className="flex gap-3">
-              <button
-                onClick={() => setFilter('all')}
-                className={`px-4 py-2 rounded-lg font-medium transition-colors ${
-                  filter === 'all'
-                    ? 'bg-blue-600 text-white'
-                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                }`}
-              >
-                Toutes ({games.length})
-              </button>
-              <button
-                onClick={() => setFilter('waiting')}
-                className={`px-4 py-2 rounded-lg font-medium transition-colors ${
-                  filter === 'waiting'
-                    ? 'bg-blue-600 text-white'
-                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                }`}
-              >
-                En attente ({games.filter((g) => g.status === 'waiting').length})
-              </button>
-              <button
-                onClick={() => setFilter('started')}
-                className={`px-4 py-2 rounded-lg font-medium transition-colors ${
-                  filter === 'started'
-                    ? 'bg-blue-600 text-white'
-                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                }`}
-              >
-                En cours ({games.filter((g) => g.status === 'started').length})
-              </button>
-              <button
-                onClick={() => setFilter('finished')}
-                className={`px-4 py-2 rounded-lg font-medium transition-colors ${
-                  filter === 'finished'
-                    ? 'bg-blue-600 text-white'
-                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                }`}
-              >
-                Terminées ({games.filter((g) => g.status === 'finished').length})
-              </button>
+        <div className="glass-panel mb-6 rounded-[30px] p-5">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex flex-wrap gap-3">
+              {[
+                ['all', `Toutes (${games.length})`],
+                ['waiting', `En attente (${games.filter((g) => g.status === 'waiting').length})`],
+                ['started', `En cours (${games.filter((g) => g.status === 'started').length})`],
+                ['finished', `Terminées (${games.filter((g) => g.status === 'finished').length})`],
+              ].map(([value, label]) => (
+                <button
+                  key={value}
+                  onClick={() => setFilter(value as 'all' | GameStatus)}
+                  className={`rounded-full px-4 py-2 text-sm font-black uppercase tracking-[0.2em] transition-colors ${
+                    filter === value ? 'action-secondary' : 'action-ghost hover:bg-white'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
             </div>
 
             <button
               onClick={() => router.push('/')}
-              className="bg-green-600 hover:bg-green-700 text-white font-semibold px-6 py-2 rounded-lg transition-colors"
+              className="action-primary rounded-[18px] px-6 py-3 text-sm font-black uppercase tracking-[0.2em] transition-transform hover:-translate-y-0.5"
             >
-              + Nouvelle partie
+              Nouvelle partie
             </button>
           </div>
         </div>
 
-        {/* Games List */}
         {filteredGames.length === 0 ? (
-          <div className="bg-white rounded-xl shadow-lg p-12 text-center">
-            <p className="text-gray-500 text-lg">Aucune partie trouvée</p>
+          <div className="glass-panel rounded-[30px] p-12 text-center">
+            <p className="section-title text-3xl font-black text-[var(--ink-1)]">Aucune partie visible</p>
+            <p className="mt-3 text-[var(--ink-2)]">Essaie un autre filtre ou crée une nouvelle session.</p>
           </div>
         ) : (
           <div className="space-y-4">
             {filteredGames.map((game) => (
-              <div key={game.id} className="bg-white rounded-xl shadow-lg p-6 hover:shadow-xl transition-shadow">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-6">
-                    {/* Code */}
-                    <div>
-                      <p className="text-sm text-gray-500 mb-1">Code</p>
-                      <p className="text-3xl font-bold font-mono text-blue-600">{game.code}</p>
+              <div key={game.id} className="glass-panel rounded-[28px] p-6 transition-transform hover:-translate-y-1">
+                <div className="flex flex-col gap-5 xl:flex-row xl:items-center xl:justify-between">
+                  <div className="grid flex-1 gap-4 md:grid-cols-4">
+                    <div className="metric-card rounded-[22px] p-4">
+                      <p className="text-[11px] font-black uppercase tracking-[0.25em] text-[var(--ink-3)]">Code</p>
+                      <p className="mt-2 font-mono text-3xl font-black text-[var(--brand)]">{game.code}</p>
                     </div>
-
-                    {/* Status */}
-                    <div>
-                      <p className="text-sm text-gray-500 mb-1">Statut</p>
-                      {getStatusBadge(game.status)}
+                    <div className="metric-card rounded-[22px] p-4">
+                      <p className="text-[11px] font-black uppercase tracking-[0.25em] text-[var(--ink-3)]">Statut</p>
+                      <div className="mt-3">{getStatusBadge(game.status)}</div>
                     </div>
-
-                    {/* Stats */}
-                    <div>
-                      <p className="text-sm text-gray-500 mb-1">Joueurs</p>
-                      <p className="text-xl font-semibold text-gray-900">{game.player_count}</p>
+                    <div className="metric-card rounded-[22px] p-4">
+                      <p className="text-[11px] font-black uppercase tracking-[0.25em] text-[var(--ink-3)]">Joueurs</p>
+                      <p className="mt-2 text-3xl font-black text-[var(--ink-1)]">{game.player_count}</p>
                     </div>
-
-                    <div>
-                      <p className="text-sm text-gray-500 mb-1">Questions</p>
-                      <p className="text-xl font-semibold text-gray-900">{game.question_count}</p>
-                    </div>
-
-                    {/* Date */}
-                    <div>
-                      <p className="text-sm text-gray-500 mb-1">Créée le</p>
-                      <p className="text-sm text-gray-900">
-                        {game.created_at ? new Date(game.created_at).toLocaleDateString('fr-FR', {
-                          day: '2-digit',
-                          month: 'short',
-                          year: 'numeric',
-                          hour: '2-digit',
-                          minute: '2-digit',
-                        }) : 'N/A'}
-                      </p>
+                    <div className="metric-card rounded-[22px] p-4">
+                      <p className="text-[11px] font-black uppercase tracking-[0.25em] text-[var(--ink-3)]">Questions</p>
+                      <p className="mt-2 text-3xl font-black text-[var(--ink-1)]">{game.question_count}</p>
                     </div>
                   </div>
 
-                  {/* Actions */}
-                  <div className="flex gap-2">
-                    <button
-                      onClick={() => router.push(`/admin/${game.id}`)}
-                      className="bg-blue-600 hover:bg-blue-700 text-white font-medium px-4 py-2 rounded-lg transition-colors"
-                    >
+                  <div className="flex flex-wrap gap-2 xl:w-[360px] xl:justify-end">
+                    <div className="mr-auto self-center text-sm text-[var(--ink-2)] xl:mr-0 xl:w-full xl:text-right">
+                      Créée le{' '}
+                      {game.created_at ? new Date(game.created_at).toLocaleDateString('fr-FR', {
+                        day: '2-digit',
+                        month: 'short',
+                        year: 'numeric',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                      }) : 'N/A'}
+                    </div>
+                    <button onClick={() => router.push(`/admin/${game.id}`)} className="action-secondary rounded-[16px] px-4 py-3 text-sm font-black uppercase tracking-[0.18em]">
                       Gérer
                     </button>
-                    <button
-                      onClick={() => handleLaunchGame(game.id)}
-                      className="bg-purple-600 hover:bg-purple-700 text-white font-medium px-4 py-2 rounded-lg transition-colors"
-                    >
+                    <button onClick={() => handleLaunchGame(game.id)} className="action-primary rounded-[16px] px-4 py-3 text-sm font-black uppercase tracking-[0.18em]">
                       Lancer
                     </button>
-                    <button
-                      onClick={() => handleDuplicateGame(game.id)}
-                      className="bg-gray-600 hover:bg-gray-700 text-white font-medium px-4 py-2 rounded-lg transition-colors"
-                    >
+                    <button onClick={() => handleDuplicateGame(game.id)} className="action-ghost rounded-[16px] px-4 py-3 text-sm font-black uppercase tracking-[0.18em]">
                       Dupliquer
                     </button>
-                    <button
-                      onClick={() => handleDeleteGame(game.id)}
-                      className="bg-red-600 hover:bg-red-700 text-white font-medium px-4 py-2 rounded-lg transition-colors"
-                    >
+                    <button onClick={() => handleDeleteGame(game.id)} className="rounded-[16px] bg-red-600 px-4 py-3 text-sm font-black uppercase tracking-[0.18em] text-white">
                       Supprimer
                     </button>
                   </div>

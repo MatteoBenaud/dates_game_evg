@@ -1,10 +1,10 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import { GameStatus, QuestionStatus } from '@/types/game.types'
-import { calculateScore } from '@/utils/score'
+import { calculateMissingAnswerScore, calculateScore } from '@/utils/score'
 import AnimatedLeaderboard from '@/components/AnimatedLeaderboard'
 import BubbleLobby from '@/components/BubbleLobby'
 import TimelineReveal from '@/components/TimelineReveal'
@@ -14,6 +14,7 @@ interface Player {
   pseudo: string
   total_score: number | null
   connected: boolean | null
+  avatar_url?: string | null
 }
 
 interface Question {
@@ -31,6 +32,10 @@ interface Answer {
   score: number | null
 }
 
+interface RealtimeQuestionChange {
+  question_id?: string
+}
+
 export default function HostPage() {
   const params = useParams()
   const router = useRouter()
@@ -45,16 +50,36 @@ export default function HostPage() {
   const [loading, setLoading] = useState(true)
   const [showTimeline, setShowTimeline] = useState(false)
   const [showLeaderboard, setShowLeaderboard] = useState(false)
-
+  const currentQuestionIdRef = useRef<string | null>(null)
+  useEffect(() => {
+    currentQuestionIdRef.current = questions[currentQuestionIndex]?.id ?? null
+  }, [questions, currentQuestionIndex])
 
   useEffect(() => {
-    loadGame()
-    const cleanup = setupRealtimeSubscriptions()
-    return cleanup
-  }, [gameId])
+    const status = questions[currentQuestionIndex]?.status
 
+    if (status === 'revealed' && !showTimeline) {
+      setShowLeaderboard(true)
+      return
+    }
 
-  const loadGame = async () => {
+    if (status !== 'revealed') {
+      setShowLeaderboard(false)
+    }
+  }, [questions, currentQuestionIndex, showTimeline])
+
+  const loadAnswers = useCallback(async (questionId: string) => {
+    if (!questionId) return
+
+    const { data } = await supabase
+      .from('answers')
+      .select('*')
+      .eq('question_id', questionId)
+
+    setAnswers(data || [])
+  }, [])
+
+  const loadGame = useCallback(async () => {
     try {
       // Load game
       const { data: game, error: gameError } = await supabase
@@ -106,20 +131,9 @@ export default function HostPage() {
       console.error('Error loading game:', error)
       setLoading(false)
     }
-  }
+  }, [gameId, loadAnswers])
 
-  const loadAnswers = async (questionId: string) => {
-    if (!questionId) return
-
-    const { data } = await supabase
-      .from('answers')
-      .select('*')
-      .eq('question_id', questionId)
-
-    setAnswers(data || [])
-  }
-
-  const setupRealtimeSubscriptions = () => {
+  const setupRealtimeSubscriptions = useCallback(() => {
     const channel = supabase
       .channel(`game:${gameId}`)
       .on(
@@ -138,13 +152,12 @@ export default function HostPage() {
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'answers' },
-        async (payload: any) => {
-          // Only reload answers if it's for current question
-          if (questions.length > 0 && questions[currentQuestionIndex]) {
-            const currentQuestionId = questions[currentQuestionIndex].id
-            if (payload.new?.question_id === currentQuestionId || !payload.new) {
-              loadAnswers(currentQuestionId)
-            }
+        async (payload: { new: RealtimeQuestionChange; old: RealtimeQuestionChange }) => {
+          const currentQuestionId = currentQuestionIdRef.current
+          const changedQuestionId = payload.new?.question_id ?? payload.old?.question_id
+
+          if (currentQuestionId && changedQuestionId === currentQuestionId) {
+            await loadAnswers(currentQuestionId)
           }
         }
       )
@@ -182,7 +195,24 @@ export default function HostPage() {
     return () => {
       channel.unsubscribe()
     }
-  }
+  }, [gameId, loadAnswers])
+
+  useEffect(() => {
+    loadGame()
+    const cleanup = setupRealtimeSubscriptions()
+    return cleanup
+  }, [gameId, loadGame, setupRealtimeSubscriptions])
+
+  useEffect(() => {
+    const currentQuestionId = questions[currentQuestionIndex]?.id
+
+    if (!currentQuestionId) {
+      setAnswers([])
+      return
+    }
+
+    loadAnswers(currentQuestionId)
+  }, [questions, currentQuestionIndex, loadAnswers])
 
 
   const handleStartGame = async () => {
@@ -216,64 +246,56 @@ export default function HostPage() {
     if (!currentQuestion) return
 
     try {
-      // Calculate scores for all answers
-      for (const answer of answers) {
-        const score = calculateScore(answer.submitted_date, currentQuestion.correct_date)
+      const scoredAnswers = answers.map((answer) => ({
+        ...answer,
+        score: calculateScore(answer.submitted_date, currentQuestion.correct_date),
+      }))
+      const missingAnswerScore = calculateMissingAnswerScore(
+        scoredAnswers.map((answer) => answer.score || 0)
+      )
+      const roundScores = new Map<string, number>()
 
-        await supabase
-          .from('answers')
-          .update({ score })
-          .eq('id', answer.id)
+      for (const answer of scoredAnswers) {
+        roundScores.set(answer.player_id, answer.score || 0)
       }
 
-      // Reload answers with scores
-      await loadAnswers(currentQuestion.id)
+      const updatedPlayers = players.map((player) => ({
+        ...player,
+        total_score: (player.total_score || 0) + (roundScores.get(player.id) ?? missingAnswerScore),
+      }))
 
-      // Mark question as revealed
-      await supabase
-        .from('questions')
-        .update({ status: 'revealed' })
-        .eq('id', currentQuestion.id)
-
-      // Show timeline animation
+      // Update the UI immediately instead of waiting for all writes.
+      setAnswers(scoredAnswers)
+      setPlayers(updatedPlayers)
       setShowTimeline(true)
       setShowLeaderboard(false)
+
+      await Promise.all([
+        ...scoredAnswers.map((answer) =>
+          supabase
+            .from('answers')
+            .update({ score: answer.score })
+            .eq('id', answer.id)
+        ),
+        ...updatedPlayers.map((player) =>
+          supabase
+            .from('players')
+            .update({ total_score: player.total_score })
+            .eq('id', player.id)
+        ),
+        supabase
+          .from('questions')
+          .update({ status: 'revealed' })
+          .eq('id', currentQuestion.id),
+      ])
     } catch (error) {
       console.error('Error revealing question:', error)
     }
   }
 
-  const handleTimelineComplete = async () => {
-    const currentQuestion = questions[currentQuestionIndex]
-
-    // Update player total scores
-    for (const player of players) {
-      const playerAnswers = await supabase
-        .from('answers')
-        .select('score, question_id')
-        .eq('player_id', player.id)
-        .in('question_id', questions.map(q => q.id))
-
-      const totalScore = playerAnswers.data?.reduce((sum, a) => sum + (a.score || 0), 0) || 0
-
-      await supabase
-        .from('players')
-        .update({ total_score: totalScore })
-        .eq('id', player.id)
-    }
-
-    // Reload players with updated scores
-    await loadGame()
-
-    // Hide timeline, show leaderboard
-    setShowTimeline(false)
-    setShowLeaderboard(true)
-  }
-
   const handleNextQuestion = async () => {
     const nextIndex = currentQuestionIndex + 1
 
-    // Reset timeline and leaderboard states
     setShowTimeline(false)
     setShowLeaderboard(false)
 
@@ -285,6 +307,7 @@ export default function HostPage() {
         .eq('id', gameId)
 
       setGameStatus('finished')
+      await loadGame()
     } else {
       // Update game index
       await supabase
@@ -304,10 +327,18 @@ export default function HostPage() {
     }
   }
 
+  const handleTimelineComplete = () => {
+    setShowTimeline(false)
+    setShowLeaderboard(true)
+  }
+
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-100">
-        <div className="text-2xl font-semibold text-gray-600">Chargement...</div>
+      <div className="app-shell flex min-h-screen items-center justify-center px-6">
+        <div className="glass-panel rounded-[30px] px-10 py-8 text-center">
+          <p className="section-title text-3xl font-black text-[var(--ink-1)]">Installation de la salle</p>
+          <p className="mt-3 text-[var(--ink-2)]">Connexion au salon et récupération des joueurs.</p>
+        </div>
       </div>
     )
   }
@@ -315,8 +346,8 @@ export default function HostPage() {
   // Redirect to admin if no questions configured
   if (questions.length === 0 && gameStatus === 'waiting') {
     return (
-      <div className="min-h-screen bg-gray-100 flex items-center justify-center p-8">
-        <div className="max-w-md bg-white rounded-xl shadow-lg p-8 text-center">
+      <div className="app-shell flex min-h-screen items-center justify-center p-8">
+        <div className="glass-panel max-w-md rounded-[30px] p-8 text-center">
           <div className="w-16 h-16 bg-yellow-100 rounded-full flex items-center justify-center mx-auto mb-4">
             <svg className="w-8 h-8 text-yellow-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
@@ -324,13 +355,10 @@ export default function HostPage() {
           </div>
           <h1 className="text-2xl font-bold text-gray-900 mb-2">Partie non configurée</h1>
           <p className="text-gray-600 mb-6">
-            Cette partie n'a pas encore de questions. Configurez-la depuis l'interface admin.
+            Cette partie n&apos;a pas encore de questions. Configurez-la depuis l&apos;interface admin.
           </p>
-          <button
-            onClick={() => router.push(`/admin/${gameId}`)}
-            className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-lg transition-colors"
-          >
-            → Aller à l'admin
+          <button onClick={() => router.push(`/admin/${gameId}`)} className="action-secondary w-full rounded-[18px] px-6 py-3 text-sm font-black uppercase tracking-[0.2em]">
+            → Aller à l&apos;admin
           </button>
         </div>
       </div>
@@ -343,25 +371,25 @@ export default function HostPage() {
   // Waiting phase
   if (gameStatus === 'waiting') {
     return (
-      <div className="min-h-screen bg-gray-100 p-8">
+      <div className="app-shell px-4 py-6 md:px-8">
         <div className="max-w-4xl mx-auto">
           <button
             onClick={() => router.push(`/admin/${gameId}`)}
-            className="text-blue-600 hover:text-blue-700 font-medium mb-4 flex items-center gap-2"
+            className="action-ghost mb-4 inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-black uppercase tracking-[0.18em]"
           >
             ⚙️ Admin
           </button>
-          <div className="bg-white rounded-xl shadow-lg p-8">
+          <div className="glass-panel rounded-[32px] p-8">
             <div className="text-center mb-8">
-              <h1 className="text-4xl font-bold text-gray-900 mb-4">En attente des joueurs</h1>
-            <div className="bg-blue-50 border-2 border-blue-500 rounded-xl p-6 mb-6">
-              <p className="text-gray-600 mb-2">Code de la partie:</p>
-              <p className="font-mono text-6xl font-bold text-blue-600">{gameCode}</p>
+              <h1 className="section-title mb-4 text-5xl font-black text-[var(--ink-1)]">Salon prêt à accueillir</h1>
+            <div className="metric-card mx-auto mb-6 max-w-xl rounded-[28px] p-6">
+              <p className="text-[11px] font-black uppercase tracking-[0.28em] text-[var(--ink-3)]">Code de la partie</p>
+              <p className="mt-3 font-mono text-6xl font-black tracking-[0.2em] text-[var(--brand)]">{gameCode}</p>
             </div>
           </div>
 
           <div className="mb-8">
-            <h2 className="text-2xl font-semibold text-gray-800 mb-4 text-center">
+            <h2 className="section-title mb-4 text-center text-3xl font-black text-[var(--ink-1)]">
               {players.length} {players.length > 1 ? 'joueurs connectés' : 'joueur connecté'}
             </h2>
             <BubbleLobby players={players} />
@@ -370,7 +398,7 @@ export default function HostPage() {
           <button
             onClick={handleStartGame}
             disabled={players.length === 0}
-            className="w-full bg-green-600 hover:bg-green-700 text-white font-semibold py-4 px-6 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-lg"
+            className="action-primary w-full rounded-[22px] px-6 py-4 text-lg font-black uppercase tracking-[0.16em] disabled:opacity-50"
           >
             Lancer la partie
           </button>
@@ -384,32 +412,59 @@ export default function HostPage() {
   const answeredCount = answers.length
   const totalPlayers = players.length
 
+  if (currentQuestionStatus === 'revealed' && showLeaderboard) {
+    return (
+      <div className="app-shell px-4 py-6 md:px-8">
+        <div className="mx-auto max-w-6xl">
+          <div className="glass-panel rounded-[32px] p-8">
+            <div className="mb-6">
+              <p className="text-xs font-black uppercase tracking-[0.28em] text-[var(--ink-3)]">Après la révélation</p>
+              <h2 className="section-title mt-2 text-4xl font-black text-[var(--ink-1)]">Classement de la partie</h2>
+            </div>
+
+            <AnimatedLeaderboard players={players} />
+
+            <div className="mt-8 border-t border-[var(--line-soft)] pt-6">
+              <button
+                onClick={handleNextQuestion}
+                className="action-secondary w-full rounded-[22px] px-6 py-4 text-lg font-black uppercase tracking-[0.16em]"
+              >
+                {currentQuestionIndex + 1 >= questions.length ? 'Terminer la partie' : 'Question suivante'}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   return (
-    <div className="min-h-screen bg-gray-100 p-8">
+    <div className="app-shell px-4 py-6 md:px-8">
       <div className="max-w-6xl mx-auto">
-        <div className="bg-white rounded-xl shadow-lg p-8 mb-6">
+        <div className="glass-panel mb-6 rounded-[32px] p-8">
           <div className="flex justify-between items-center mb-6">
-            <h1 className="text-3xl font-bold text-gray-900">
+            <h1 className="section-title text-4xl font-black text-[var(--ink-1)]">
               Question {currentQuestionIndex + 1} / {questions.length}
             </h1>
             <div className="text-right">
-              <p className="text-gray-600">Code: <span className="font-mono font-bold">{gameCode}</span></p>
-              <p className="text-gray-600">Joueurs: {totalPlayers}</p>
+              <p className="text-[var(--ink-2)]">Code: <span className="font-mono font-bold text-[var(--brand)]">{gameCode}</span></p>
+              <p className="text-[var(--ink-2)]">Joueurs: {totalPlayers}</p>
             </div>
           </div>
 
-          <div className="bg-blue-50 border-2 border-blue-500 rounded-xl p-6 mb-6">
-            <p className="text-2xl font-semibold text-gray-900">{currentQuestion?.text}</p>
+          <div className="metric-card mb-6 rounded-[28px] p-6">
+            <p className="text-[11px] font-black uppercase tracking-[0.28em] text-[var(--ink-3)]">Question en cours</p>
+            <p className="mt-3 text-3xl font-black text-[var(--ink-1)]">{currentQuestion?.text}</p>
           </div>
 
           <div className="mb-6">
             <div className="flex items-center justify-between mb-2">
-              <p className="text-gray-700 font-medium">Réponses reçues</p>
-              <p className="text-2xl font-bold text-blue-600">{answeredCount} / {totalPlayers}</p>
+              <p className="font-medium text-[var(--ink-2)]">Réponses reçues</p>
+              <p className="text-2xl font-black text-[var(--accent)]">{answeredCount} / {totalPlayers}</p>
             </div>
-            <div className="w-full bg-gray-200 rounded-full h-4">
+            <div className="h-4 w-full rounded-full bg-[rgba(23,32,51,0.08)]">
               <div
-                className="bg-blue-600 h-4 rounded-full transition-all duration-300"
+                className="h-4 rounded-full bg-gradient-to-r from-[var(--accent)] to-[var(--brand)] transition-all duration-300"
                 style={{ width: `${totalPlayers > 0 ? (answeredCount / totalPlayers) * 100 : 0}%` }}
               />
             </div>
@@ -419,7 +474,7 @@ export default function HostPage() {
             {currentQuestionStatus === 'open' && (
               <button
                 onClick={handleRevealQuestion}
-                className="flex-1 bg-orange-600 hover:bg-orange-700 text-white font-semibold py-4 px-6 rounded-lg transition-colors text-lg"
+                className="action-primary flex-1 rounded-[22px] px-6 py-4 text-lg font-black uppercase tracking-[0.16em]"
               >
                 Révéler les réponses
               </button>
@@ -428,7 +483,7 @@ export default function HostPage() {
             {currentQuestionStatus === 'revealed' && showLeaderboard && (
               <button
                 onClick={handleNextQuestion}
-                className="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-semibold py-4 px-6 rounded-lg transition-colors text-lg"
+                className="action-secondary flex-1 rounded-[22px] px-6 py-4 text-lg font-black uppercase tracking-[0.16em]"
               >
                 {currentQuestionIndex + 1 >= questions.length ? 'Terminer la partie' : 'Question suivante'}
               </button>
@@ -438,7 +493,7 @@ export default function HostPage() {
 
         {/* Timeline reveal - Full screen overlay */}
         {currentQuestionStatus === 'revealed' && showTimeline && (
-          <div className="fixed inset-0 z-50">
+          <div className="fixed inset-0 z-50 overflow-y-auto">
             <TimelineReveal
               correctDate={currentQuestion.correct_date}
               answers={answers}
@@ -448,18 +503,10 @@ export default function HostPage() {
           </div>
         )}
 
-        {/* Leaderboard */}
-        {currentQuestionStatus === 'revealed' && showLeaderboard && (
-          <div className="bg-white rounded-xl shadow-lg p-8">
-            <h2 className="text-2xl font-bold text-gray-900 mb-6">Classement</h2>
-            <AnimatedLeaderboard players={players} />
-          </div>
-        )}
-
         {/* Final leaderboard */}
         {gameStatus === 'finished' && (
-          <div className="bg-white rounded-xl shadow-lg p-8">
-            <h2 className="text-4xl font-bold mb-8 text-center text-gray-900">🏆 Classement Final 🏆</h2>
+          <div className="glass-panel rounded-[32px] p-8">
+            <h2 className="section-title mb-8 text-center text-5xl font-black text-[var(--ink-1)]">Classement final</h2>
             <AnimatedLeaderboard players={players} />
           </div>
         )}
