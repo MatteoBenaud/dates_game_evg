@@ -74,7 +74,7 @@ export default function AdminGamePage() {
         .eq('game_id', gameId)
         .order('question_number', { ascending: true })
 
-      setGame(gameData)
+      setGame(gameData ? { ...gameData, status: gameData.status as GameStatus } : null)
       setPlayers(playersData || [])
       setQuestions((questionsData || []).map(q => ({ ...q, status: q.status as QuestionStatus })))
       setLoading(false)
