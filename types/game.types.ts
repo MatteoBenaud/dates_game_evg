@@ -13,6 +13,7 @@ export interface QuestionWithAnswers {
   id: string
   question_number: number
   text: string
+  image_data_url?: string | null
   status: QuestionStatus
   correct_date?: string // Only available when revealed
   answers?: Array<{

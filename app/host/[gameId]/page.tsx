@@ -1,6 +1,8 @@
 'use client'
 
 import { useState, useEffect, useRef, useCallback } from 'react'
+import NextImage from 'next/image'
+import { flushSync } from 'react-dom'
 import { useParams, useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import { GameStatus, QuestionStatus } from '@/types/game.types'
@@ -21,6 +23,7 @@ interface Question {
   id: string
   question_number: number
   text: string
+  image_data_url: string | null
   correct_date: string
   status: QuestionStatus
 }
@@ -34,6 +37,12 @@ interface Answer {
 
 interface RealtimeQuestionChange {
   question_id?: string
+}
+
+function waitForNextPaint() {
+  return new Promise<void>((resolve) => {
+    requestAnimationFrame(() => resolve())
+  })
 }
 
 export default function HostPage() {
@@ -50,6 +59,7 @@ export default function HostPage() {
   const [loading, setLoading] = useState(true)
   const [showTimeline, setShowTimeline] = useState(false)
   const [showLeaderboard, setShowLeaderboard] = useState(false)
+  const [isPreparingReveal, setIsPreparingReveal] = useState(false)
   const currentQuestionIdRef = useRef<string | null>(null)
   useEffect(() => {
     currentQuestionIdRef.current = questions[currentQuestionIndex]?.id ?? null
@@ -264,11 +274,20 @@ export default function HostPage() {
         total_score: (player.total_score || 0) + (roundScores.get(player.id) ?? missingAnswerScore),
       }))
 
-      // Update the UI immediately instead of waiting for all writes.
-      setAnswers(scoredAnswers)
-      setPlayers(updatedPlayers)
-      setShowTimeline(true)
-      setShowLeaderboard(false)
+      // Force an immediate visual transition before mounting the heavy reveal screen.
+      flushSync(() => {
+        setAnswers(scoredAnswers)
+        setPlayers(updatedPlayers)
+        setShowLeaderboard(false)
+        setIsPreparingReveal(true)
+      })
+
+      await waitForNextPaint()
+      flushSync(() => {
+        setShowTimeline(true)
+        setIsPreparingReveal(false)
+      })
+      await waitForNextPaint()
 
       await Promise.all([
         ...scoredAnswers.map((answer) =>
@@ -309,20 +328,45 @@ export default function HostPage() {
       setGameStatus('finished')
       await loadGame()
     } else {
-      // Update game index
-      await supabase
-        .from('games')
-        .update({ current_question_index: nextIndex })
-        .eq('id', gameId)
+      const nextQuestion = questions[nextIndex]
 
-      // Open next question automatically
-      await supabase
-        .from('questions')
-        .update({ status: 'open' })
-        .eq('id', questions[nextIndex].id)
-
+      // Optimistically switch the UI to the next question before the realtime round-trip completes.
       setCurrentQuestionIndex(nextIndex)
-      loadAnswers(questions[nextIndex].id)
+      setAnswers([])
+      setQuestions((currentQuestions) =>
+        currentQuestions.map((question, index) => {
+          if (index === nextIndex) {
+            return { ...question, status: 'open' }
+          }
+
+          return question
+        })
+      )
+
+      // Update game index
+      const [gameUpdate, questionUpdate] = await Promise.all([
+        supabase
+          .from('games')
+          .update({ current_question_index: nextIndex })
+          .eq('id', gameId),
+        supabase
+          .from('questions')
+          .update({ status: 'open' })
+          .eq('id', nextQuestion.id),
+      ])
+
+      if (gameUpdate.error) throw gameUpdate.error
+      if (questionUpdate.error) throw questionUpdate.error
+
+      loadAnswers(nextQuestion.id)
+    }
+  }
+
+  const handleNextQuestionSafe = async () => {
+    try {
+      await handleNextQuestion()
+    } catch (error) {
+      console.error('Error moving to next question:', error)
       await loadGame()
     }
   }
@@ -411,6 +455,7 @@ export default function HostPage() {
   // Game phase
   const answeredCount = answers.length
   const totalPlayers = players.length
+  const answeredPlayerIds = new Set(answers.map((answer) => answer.player_id))
 
   if (currentQuestionStatus === 'revealed' && showLeaderboard) {
     return (
@@ -426,7 +471,7 @@ export default function HostPage() {
 
             <div className="mt-8 border-t border-[var(--line-soft)] pt-6">
               <button
-                onClick={handleNextQuestion}
+                onClick={handleNextQuestionSafe}
                 className="action-secondary w-full rounded-[22px] px-6 py-4 text-lg font-black uppercase tracking-[0.16em]"
               >
                 {currentQuestionIndex + 1 >= questions.length ? 'Terminer la partie' : 'Question suivante'}
@@ -455,6 +500,18 @@ export default function HostPage() {
           <div className="metric-card mb-6 rounded-[28px] p-6">
             <p className="text-[11px] font-black uppercase tracking-[0.28em] text-[var(--ink-3)]">Question en cours</p>
             <p className="mt-3 text-3xl font-black text-[var(--ink-1)]">{currentQuestion?.text}</p>
+            {currentQuestion?.image_data_url && (
+              <div className="mt-6 overflow-hidden rounded-[24px] border border-[var(--line-soft)] bg-white/80 p-4">
+                <NextImage
+                  src={currentQuestion.image_data_url}
+                  alt={`Illustration de la question ${currentQuestionIndex + 1}`}
+                  width={1600}
+                  height={900}
+                  unoptimized
+                  className="mx-auto max-h-[28rem] w-full rounded-[18px] object-contain"
+                />
+              </div>
+            )}
           </div>
 
           <div className="mb-6">
@@ -470,6 +527,65 @@ export default function HostPage() {
             </div>
           </div>
 
+          <div className="metric-card mb-6 rounded-[28px] p-5">
+            <div className="mb-4 flex items-center justify-between gap-4">
+              <div>
+                <p className="text-[11px] font-black uppercase tracking-[0.28em] text-[var(--ink-3)]">Statut des joueurs</p>
+                <p className="mt-1 text-sm text-[var(--ink-2)]">Vert = réponse envoyée. Gris = en attente.</p>
+              </div>
+              <div className="rounded-full bg-white/80 px-3 py-2 text-xs font-black uppercase tracking-[0.16em] text-[var(--ink-2)]">
+                {answeredCount} / {totalPlayers}
+              </div>
+            </div>
+
+            <div className="grid max-h-56 grid-cols-2 gap-3 overflow-y-auto pr-1 sm:grid-cols-3 xl:grid-cols-4">
+              {players.map((player) => {
+                const hasAnswered = answeredPlayerIds.has(player.id)
+
+                return (
+                  <div
+                    key={player.id}
+                    className={`flex items-center gap-3 rounded-[20px] border px-3 py-2.5 transition-colors ${
+                      hasAnswered
+                        ? 'border-emerald-200 bg-emerald-50/80'
+                        : 'border-[var(--line-soft)] bg-white/80'
+                    }`}
+                  >
+                    <div className="relative h-11 w-11 shrink-0 overflow-hidden rounded-full border border-white/80 bg-[rgba(23,32,51,0.08)]">
+                      {player.avatar_url ? (
+                        <NextImage
+                          src={player.avatar_url}
+                          alt={player.pseudo}
+                          fill
+                          unoptimized
+                          sizes="44px"
+                          className="object-cover"
+                        />
+                      ) : (
+                        <div className="flex h-full w-full items-center justify-center bg-gradient-to-br from-[var(--brand)] to-[var(--brand-strong)] text-sm font-black text-white">
+                          {player.pseudo.charAt(0).toUpperCase()}
+                        </div>
+                      )}
+
+                      <span
+                        className={`absolute bottom-0 right-0 h-3.5 w-3.5 rounded-full border-2 border-white ${
+                          hasAnswered ? 'bg-emerald-500' : 'bg-slate-300'
+                        }`}
+                      />
+                    </div>
+
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-bold text-[var(--ink-1)]">{player.pseudo}</p>
+                      <p className={`text-xs font-medium ${hasAnswered ? 'text-emerald-700' : 'text-[var(--ink-3)]'}`}>
+                        {hasAnswered ? 'A repondu' : 'En attente'}
+                      </p>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+
           <div className="flex gap-4">
             {currentQuestionStatus === 'open' && (
               <button
@@ -482,7 +598,7 @@ export default function HostPage() {
 
             {currentQuestionStatus === 'revealed' && showLeaderboard && (
               <button
-                onClick={handleNextQuestion}
+                onClick={handleNextQuestionSafe}
                 className="action-secondary flex-1 rounded-[22px] px-6 py-4 text-lg font-black uppercase tracking-[0.16em]"
               >
                 {currentQuestionIndex + 1 >= questions.length ? 'Terminer la partie' : 'Question suivante'}
@@ -490,6 +606,16 @@ export default function HostPage() {
             )}
           </div>
         </div>
+
+        {isPreparingReveal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-[rgba(10,16,32,0.92)] px-6 text-center">
+            <div className="max-w-lg">
+              <p className="text-xs font-black uppercase tracking-[0.3em] text-white/45">Reveal</p>
+              <h2 className="section-title mt-4 text-4xl font-black text-white md:text-5xl">Preparation du reveal</h2>
+              <div className="mx-auto mt-8 h-16 w-16 rounded-full border-4 border-white/20 border-t-[var(--brand)] animate-spin" />
+            </div>
+          </div>
+        )}
 
         {/* Timeline reveal - Full screen overlay */}
         {currentQuestionStatus === 'revealed' && showTimeline && (

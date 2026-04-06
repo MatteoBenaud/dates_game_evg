@@ -127,6 +127,7 @@ export type Database = {
           created_at: string | null
           game_id: string
           id: string
+          image_data_url: string | null
           question_number: number
           status: string
           text: string
@@ -136,6 +137,7 @@ export type Database = {
           created_at?: string | null
           game_id: string
           id?: string
+          image_data_url?: string | null
           question_number: number
           status?: string
           text: string
@@ -145,6 +147,7 @@ export type Database = {
           created_at?: string | null
           game_id?: string
           id?: string
+          image_data_url?: string | null
           question_number?: number
           status?: string
           text?: string

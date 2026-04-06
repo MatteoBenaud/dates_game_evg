@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useEffect, useRef, useCallback } from 'react'
+import type { ChangeEvent } from 'react'
 import { useParams } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import { GameStatus, QuestionStatus } from '@/types/game.types'
@@ -87,6 +88,41 @@ async function compressAvatar(file: File): Promise<string> {
   return compressed
 }
 
+function formatAnswerDate(day: string, month: string, year: string): string | null {
+  if (day.length !== 2 || month.length !== 2 || year.length !== 4) {
+    return null
+  }
+
+  const dayNumber = Number(day)
+  const monthNumber = Number(month)
+  const yearNumber = Number(year)
+
+  if (
+    Number.isNaN(dayNumber) ||
+    Number.isNaN(monthNumber) ||
+    Number.isNaN(yearNumber) ||
+    dayNumber < 1 ||
+    dayNumber > 31 ||
+    monthNumber < 1 ||
+    monthNumber > 12 ||
+    yearNumber < 1
+  ) {
+    return null
+  }
+
+  const candidate = new Date(Date.UTC(yearNumber, monthNumber - 1, dayNumber))
+
+  if (
+    candidate.getUTCFullYear() !== yearNumber ||
+    candidate.getUTCMonth() !== monthNumber - 1 ||
+    candidate.getUTCDate() !== dayNumber
+  ) {
+    return null
+  }
+
+  return `${year}-${month}-${day}`
+}
+
 export default function PlayerPage() {
   const params = useParams()
   const gameId = params.gameId as string
@@ -100,7 +136,9 @@ export default function PlayerPage() {
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0)
   const [currentQuestion, setCurrentQuestion] = useState<Question | null>(null)
   const [myAnswer, setMyAnswer] = useState<Answer | null>(null)
-  const [selectedDate, setSelectedDate] = useState('')
+  const [selectedDay, setSelectedDay] = useState('')
+  const [selectedMonth, setSelectedMonth] = useState('')
+  const [selectedYear, setSelectedYear] = useState('')
   const [allPlayers, setAllPlayers] = useState<Player[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -361,9 +399,24 @@ export default function PlayerPage() {
       })
   }
 
+  const handleDatePartChange = (
+    event: ChangeEvent<HTMLInputElement>,
+    setter: (value: string) => void,
+    maxLength: number
+  ) => {
+    setter(event.target.value.replace(/\D/g, '').slice(0, maxLength))
+  }
+
   const handleSubmitAnswer = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!playerId || !currentQuestion) return
+
+    const formattedDate = formatAnswerDate(selectedDay, selectedMonth, selectedYear)
+
+    if (!formattedDate) {
+      alert('Entre une date valide au format jj / mm / yyyy')
+      return
+    }
 
     setLoading(true)
 
@@ -374,13 +427,15 @@ export default function PlayerPage() {
           {
             question_id: currentQuestion.id,
             player_id: playerId,
-            submitted_date: selectedDate,
+            submitted_date: formattedDate,
           },
         ])
 
       if (error) throw error
 
-      setSelectedDate('')
+      setSelectedDay('')
+      setSelectedMonth('')
+      setSelectedYear('')
       loadCurrentQuestion()
     } catch (error) {
       console.error('Error submitting answer:', error)
@@ -575,20 +630,49 @@ export default function PlayerPage() {
             <form onSubmit={handleSubmitAnswer} className="space-y-4">
               <div>
                 <label className="mb-2 block text-sm font-black uppercase tracking-[0.2em] text-[var(--ink-3)]">
-                  Sélectionne une date
+                  Entre une date
                 </label>
-                <input
-                  type="date"
-                  value={selectedDate}
-                  onChange={(e) => setSelectedDate(e.target.value)}
-                  className="w-full rounded-[20px] border border-[var(--line-soft)] bg-white/85 px-4 py-4 text-lg text-[var(--ink-1)] outline-none"
-                  required
-                />
+                <div className="grid grid-cols-3 gap-3">
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    pattern="[0-9]*"
+                    placeholder="JJ"
+                    value={selectedDay}
+                    onChange={(e) => handleDatePartChange(e, setSelectedDay, 2)}
+                    className="w-full rounded-[20px] border border-[var(--line-soft)] bg-white/85 px-4 py-4 text-center text-lg font-black uppercase text-[var(--ink-1)] outline-none"
+                    aria-label="Jour"
+                    required
+                  />
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    pattern="[0-9]*"
+                    placeholder="MM"
+                    value={selectedMonth}
+                    onChange={(e) => handleDatePartChange(e, setSelectedMonth, 2)}
+                    className="w-full rounded-[20px] border border-[var(--line-soft)] bg-white/85 px-4 py-4 text-center text-lg font-black uppercase text-[var(--ink-1)] outline-none"
+                    aria-label="Mois"
+                    required
+                  />
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    pattern="[0-9]*"
+                    placeholder="YYYY"
+                    value={selectedYear}
+                    onChange={(e) => handleDatePartChange(e, setSelectedYear, 4)}
+                    className="w-full rounded-[20px] border border-[var(--line-soft)] bg-white/85 px-4 py-4 text-center text-lg font-black uppercase text-[var(--ink-1)] outline-none"
+                    aria-label="Année"
+                    required
+                  />
+                </div>
+                <p className="mt-2 text-xs text-[var(--ink-3)]">Champs numériques uniquement. Exemple: 07 / 04 / 1998.</p>
               </div>
 
               <button
                 type="submit"
-                disabled={loading || !selectedDate}
+                disabled={loading || !selectedDay || !selectedMonth || !selectedYear}
                 className="action-primary w-full rounded-[20px] px-6 py-4 text-lg font-black uppercase tracking-[0.14em] disabled:opacity-50"
               >
                 {loading ? 'Envoi...' : 'Valider ma réponse'}

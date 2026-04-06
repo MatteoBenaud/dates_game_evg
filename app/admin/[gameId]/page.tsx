@@ -1,10 +1,52 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
+import { ChangeEvent, useState, useEffect, useCallback } from 'react'
+import NextImage from 'next/image'
 import { useParams, useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import { GameStatus, QuestionStatus } from '@/types/game.types'
 import { formatScore } from '@/utils/score'
+
+const MAX_QUESTION_IMAGE_BYTES = 1_500_000
+const MAX_QUESTION_IMAGE_DIMENSION = 1600
+
+async function compressQuestionImage(file: File): Promise<string> {
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(reader.result as string)
+    reader.onerror = () => reject(new Error('Impossible de lire le fichier'))
+    reader.readAsDataURL(file)
+  })
+
+  const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+    const img = new Image()
+    img.onload = () => resolve(img)
+    img.onerror = () => reject(new Error('Impossible de charger l’image'))
+    img.src = dataUrl
+  })
+
+  const scale = Math.min(1, MAX_QUESTION_IMAGE_DIMENSION / Math.max(image.width, image.height))
+  const canvas = document.createElement('canvas')
+  canvas.width = Math.max(1, Math.round(image.width * scale))
+  canvas.height = Math.max(1, Math.round(image.height * scale))
+
+  const context = canvas.getContext('2d')
+  if (!context) {
+    throw new Error('Canvas indisponible')
+  }
+
+  context.drawImage(image, 0, 0, canvas.width, canvas.height)
+
+  let quality = 0.9
+  let compressed = canvas.toDataURL('image/jpeg', quality)
+
+  while (compressed.length > MAX_QUESTION_IMAGE_BYTES * 1.37 && quality > 0.4) {
+    quality -= 0.1
+    compressed = canvas.toDataURL('image/jpeg', quality)
+  }
+
+  return compressed
+}
 
 interface Game {
   id: string
@@ -29,6 +71,7 @@ interface Question {
   id: string
   question_number: number
   text: string
+  image_data_url: string | null
   correct_date: string
   status: QuestionStatus
 }
@@ -47,12 +90,17 @@ export default function AdminGamePage() {
   const [editingQuestion, setEditingQuestion] = useState<string | null>(null)
   const [editedText, setEditedText] = useState('')
   const [editedDate, setEditedDate] = useState('')
+  const [editedImageDataUrl, setEditedImageDataUrl] = useState('')
+  const [editUploadKey, setEditUploadKey] = useState(0)
 
   // Add question states
   const [showAddForm, setShowAddForm] = useState(false)
   const [newQuestionText, setNewQuestionText] = useState('')
   const [newQuestionDate, setNewQuestionDate] = useState('')
+  const [newQuestionImageDataUrl, setNewQuestionImageDataUrl] = useState('')
+  const [newUploadKey, setNewUploadKey] = useState(0)
   const [isAdding, setIsAdding] = useState(false)
+  const [uploadingImageTarget, setUploadingImageTarget] = useState<'new' | 'edit' | null>(null)
 
   const loadGameMeta = useCallback(async () => {
     const { data: gameData, error } = await supabase
@@ -138,16 +186,53 @@ export default function AdminGamePage() {
     setEditingQuestion(question.id)
     setEditedText(question.text)
     setEditedDate(question.correct_date)
+    setEditedImageDataUrl(question.image_data_url || '')
+    setEditUploadKey((key) => key + 1)
+  }
+
+  const handleQuestionImageChange = async (
+    event: ChangeEvent<HTMLInputElement>,
+    target: 'new' | 'edit'
+  ) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+
+    if (!file.type.startsWith('image/')) {
+      alert('Sélectionne un fichier image')
+      return
+    }
+
+    setUploadingImageTarget(target)
+
+    try {
+      const compressedImage = await compressQuestionImage(file)
+
+      if (target === 'new') {
+        setNewQuestionImageDataUrl(compressedImage)
+      } else {
+        setEditedImageDataUrl(compressedImage)
+      }
+    } catch (error) {
+      console.error('Error processing question image:', error)
+      alert('Impossible de préparer cette image')
+    } finally {
+      setUploadingImageTarget(null)
+    }
   }
 
   const handleSaveQuestion = async (questionId: string) => {
     try {
       await supabase
         .from('questions')
-        .update({ text: editedText, correct_date: editedDate })
+        .update({
+          text: editedText,
+          correct_date: editedDate,
+          image_data_url: editedImageDataUrl || null,
+        })
         .eq('id', questionId)
 
       setEditingQuestion(null)
+      setEditedImageDataUrl('')
       loadGame()
     } catch (error) {
       console.error('Error saving question:', error)
@@ -177,12 +262,15 @@ export default function AdminGamePage() {
         game_id: gameId,
         question_number: newQuestionNumber,
         text: newQuestionText,
+        image_data_url: newQuestionImageDataUrl || null,
         correct_date: newQuestionDate,
         status: 'locked',
       }])
 
       setNewQuestionText('')
       setNewQuestionDate('')
+      setNewQuestionImageDataUrl('')
+      setNewUploadKey((key) => key + 1)
       setShowAddForm(false)
       loadGame()
     } catch (error) {
@@ -356,6 +444,42 @@ export default function AdminGamePage() {
                   onChange={(e) => setNewQuestionText(e.target.value)}
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg"
                 />
+                <div className="space-y-3 rounded-lg border border-dashed border-green-400 bg-white p-3">
+                  <div>
+                    <p className="text-sm font-medium text-gray-700">Photo optionnelle</p>
+                    <p className="text-xs text-gray-500">La question sera affichée au-dessus de l’image côté host.</p>
+                  </div>
+                  <input
+                    key={newUploadKey}
+                    type="file"
+                    accept="image/*"
+                    onChange={(e) => handleQuestionImageChange(e, 'new')}
+                    className="block w-full text-sm text-gray-700 file:mr-4 file:rounded-lg file:border-0 file:bg-green-600 file:px-4 file:py-2 file:font-semibold file:text-white"
+                  />
+                  {uploadingImageTarget === 'new' && <p className="text-sm text-gray-500">Préparation de l’image...</p>}
+                  {newQuestionImageDataUrl && (
+                    <div className="space-y-3">
+                      <NextImage
+                        src={newQuestionImageDataUrl}
+                        alt="Aperçu de la question"
+                        width={1600}
+                        height={900}
+                        unoptimized
+                        className="max-h-56 w-full rounded-lg object-contain"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setNewQuestionImageDataUrl('')
+                          setNewUploadKey((key) => key + 1)
+                        }}
+                        className="text-sm font-medium text-red-600 hover:text-red-700"
+                      >
+                        Retirer la photo
+                      </button>
+                    </div>
+                  )}
+                </div>
                 <input
                   type="date"
                   value={newQuestionDate}
@@ -386,6 +510,42 @@ export default function AdminGamePage() {
                           onChange={(e) => setEditedText(e.target.value)}
                           className="w-full px-3 py-2 border border-gray-300 rounded-lg"
                         />
+                        <div className="space-y-3 rounded-lg border border-dashed border-gray-300 bg-gray-50 p-3">
+                          <div>
+                            <p className="text-sm font-medium text-gray-700">Photo de la question</p>
+                            <p className="text-xs text-gray-500">Optionnelle, affichée sous la question sur l’écran host.</p>
+                          </div>
+                          <input
+                            key={`${question.id}-${editUploadKey}`}
+                            type="file"
+                            accept="image/*"
+                            onChange={(e) => handleQuestionImageChange(e, 'edit')}
+                            className="block w-full text-sm text-gray-700 file:mr-4 file:rounded-lg file:border-0 file:bg-blue-600 file:px-4 file:py-2 file:font-semibold file:text-white"
+                          />
+                          {uploadingImageTarget === 'edit' && <p className="text-sm text-gray-500">Préparation de l’image...</p>}
+                          {editedImageDataUrl && (
+                            <div className="space-y-3">
+                              <NextImage
+                                src={editedImageDataUrl}
+                                alt="Aperçu de la question"
+                                width={1600}
+                                height={900}
+                                unoptimized
+                                className="max-h-56 w-full rounded-lg object-contain"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setEditedImageDataUrl('')
+                                  setEditUploadKey((key) => key + 1)
+                                }}
+                                className="text-sm font-medium text-red-600 hover:text-red-700"
+                              >
+                                Retirer la photo
+                              </button>
+                            </div>
+                          )}
+                        </div>
                         <input
                           type="date"
                           value={editedDate}
@@ -413,6 +573,16 @@ export default function AdminGamePage() {
                           <div className="flex-1">
                             <span className="font-bold text-gray-700">Q{question.question_number}.</span>
                             <p className="text-gray-900 mt-1">{question.text}</p>
+                            {question.image_data_url && (
+                              <NextImage
+                                src={question.image_data_url}
+                                alt={`Illustration pour la question ${question.question_number}`}
+                                width={1600}
+                                height={900}
+                                unoptimized
+                                className="mt-3 max-h-44 w-full rounded-lg border border-gray-200 object-contain"
+                              />
+                            )}
                             <p className="text-sm text-gray-500 mt-1">
                               Réponse: {new Date(question.correct_date).toLocaleDateString('fr-FR')}
                             </p>

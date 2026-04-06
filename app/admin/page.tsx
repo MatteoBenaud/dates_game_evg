@@ -109,6 +109,7 @@ export default function AdminDashboard() {
           game_id: newGame.id,
           question_number: q.question_number,
           text: q.text,
+          image_data_url: q.image_data_url,
           correct_date: q.correct_date,
           status: 'locked',
         }))
