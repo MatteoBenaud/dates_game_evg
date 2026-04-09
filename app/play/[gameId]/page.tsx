@@ -2,10 +2,12 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react'
 import type { ChangeEvent } from 'react'
+import NextImage from 'next/image'
 import { useParams } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import { GameStatus, QuestionStatus } from '@/types/game.types'
 import { formatScore } from '@/utils/score'
+import { dataUrlToBlob } from '@/utils/storage'
 
 interface Game {
   id: string
@@ -26,6 +28,8 @@ interface Player {
   id: string
   pseudo: string
   total_score: number | null
+  connected?: boolean | null
+  last_seen?: string | null
 }
 
 interface Answer {
@@ -39,12 +43,19 @@ interface RealtimeGameChange {
   current_question_index?: number
 }
 
-interface RealtimeQuestionChange {
-  question_id?: string
+const PRESENCE_HEARTBEAT_MS = 15_000
+
+function sortPlayersByScore(items: Player[]) {
+  return [...items].sort((a, b) => (a.total_score || 0) - (b.total_score || 0))
 }
 
-interface RealtimePlayerChange {
-  player_id?: string
+function upsertById<T extends { id: string }>(items: T[], nextItem: T) {
+  const index = items.findIndex((item) => item.id === nextItem.id)
+  if (index === -1) return [...items, nextItem]
+
+  const nextItems = [...items]
+  nextItems[index] = nextItem
+  return nextItems
 }
 
 const MAX_AVATAR_BYTES = 2 * 1024 * 1024
@@ -135,6 +146,7 @@ export default function PlayerPage() {
   const [gameStatus, setGameStatus] = useState<GameStatus>('waiting')
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0)
   const [currentQuestion, setCurrentQuestion] = useState<Question | null>(null)
+  const [questionCount, setQuestionCount] = useState(0)
   const [myAnswer, setMyAnswer] = useState<Answer | null>(null)
   const [selectedDay, setSelectedDay] = useState('')
   const [selectedMonth, setSelectedMonth] = useState('')
@@ -142,9 +154,11 @@ export default function PlayerPage() {
   const [allPlayers, setAllPlayers] = useState<Player[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting')
+
+  // KAHOOT PATTERN: Use refs to avoid dependency loops
   const playerIdRef = useRef<string | null>(null)
   const currentQuestionIndexRef = useRef(0)
-  const currentQuestionIdRef = useRef<string | null>(null)
 
   useEffect(() => {
     playerIdRef.current = playerId
@@ -154,10 +168,6 @@ export default function PlayerPage() {
     currentQuestionIndexRef.current = currentQuestionIndex
   }, [currentQuestionIndex])
 
-  useEffect(() => {
-    currentQuestionIdRef.current = currentQuestion?.id ?? null
-  }, [currentQuestion])
-
   const loadPlayers = useCallback(async () => {
     const { data } = await supabase
       .from('players')
@@ -165,7 +175,7 @@ export default function PlayerPage() {
       .eq('game_id', gameId)
       .order('total_score', { ascending: true })
 
-    setAllPlayers(data || [])
+    setAllPlayers(sortPlayersByScore(data || []))
   }, [gameId])
 
   const loadGame = useCallback(async () => {
@@ -195,6 +205,7 @@ export default function PlayerPage() {
         .eq('game_id', gameId)
         .order('question_number', { ascending: true })
 
+      setQuestionCount(questions?.length || 0)
       const nextQuestion = questions?.[currentQuestionIndexRef.current]
 
       if (nextQuestion) {
@@ -211,12 +222,14 @@ export default function PlayerPage() {
 
         // Load my answer if exists
         if (playerIdRef.current) {
-          const { data: answerData } = await supabase
+          const { data: answerData, error: answerError } = await supabase
             .from('answers')
             .select('*')
             .eq('question_id', question.id)
             .eq('player_id', playerIdRef.current)
-            .single()
+            .maybeSingle()
+
+          if (answerError) throw answerError
 
           setMyAnswer(answerData || null)
         }
@@ -229,23 +242,98 @@ export default function PlayerPage() {
     }
   }, [gameId])
 
-  const setupRealtimeSubscriptions = useCallback(() => {
-    console.log('[Realtime] Setting up subscriptions for game:', gameId)
+  const resyncGameState = useCallback(async () => {
+    await loadGame()
+    await loadCurrentQuestion()
+  }, [loadCurrentQuestion, loadGame])
 
+  const clearPlayerSession = useCallback(() => {
+    localStorage.removeItem(`player_${gameId}`)
+    setHasJoined(false)
+    setPlayerId(null)
+    setGame(null)
+    setCurrentQuestion(null)
+    setQuestionCount(0)
+    setMyAnswer(null)
+    setAllPlayers([])
+    setError('')
+  }, [gameId])
+
+  const markPlayerPresence = useCallback(async (playerIdToUpdate: string, connected: boolean) => {
+    const { error: updateError } = await supabase
+      .from('players')
+      .update({
+        connected,
+        last_seen: new Date().toISOString(),
+      })
+      .eq('id', playerIdToUpdate)
+      .eq('game_id', gameId)
+
+    if (updateError) {
+      console.error('Error updating player presence:', updateError)
+    }
+  }, [gameId])
+
+  const restorePlayerSession = useCallback(async (savedPlayerId: string) => {
+    const { data: existingPlayer, error: playerError } = await supabase
+      .from('players')
+      .select('id')
+      .eq('id', savedPlayerId)
+      .eq('game_id', gameId)
+      .maybeSingle()
+
+    if (playerError) {
+      console.error('Error restoring player session:', playerError)
+      clearPlayerSession()
+      return
+    }
+
+    if (!existingPlayer) {
+      clearPlayerSession()
+      return
+    }
+
+    await markPlayerPresence(savedPlayerId, true)
+    setPlayerId(savedPlayerId)
+    setHasJoined(true)
+  }, [clearPlayerSession, gameId, markPlayerPresence])
+
+  // KAHOOT PATTERN: Check localStorage on mount only
+  useEffect(() => {
+    const savedPlayerId = localStorage.getItem(`player_${gameId}`)
+    if (savedPlayerId) {
+      restorePlayerSession(savedPlayerId)
+    }
+  }, [gameId, restorePlayerSession])
+
+  // KAHOOT PATTERN: Single subscription setup when player has joined
+  useEffect(() => {
+    if (!hasJoined) return
+
+    setConnectionStatus('connecting')
+
+    // Load initial data
+    loadGame()
+
+    // Setup real-time listeners
     const channel = supabase
       .channel(`player:${gameId}`)
+      .on('system', { event: 'connected' }, () => {
+        setConnectionStatus('connected')
+        console.log('✅ [Player] Real-time connected')
+      })
+      .on('system', { event: 'disconnected' }, () => {
+        setConnectionStatus('disconnected')
+        console.warn('⚠️ [Player] Real-time disconnected (may reconnect automatically)')
+      })
       .on(
         'postgres_changes',
         { event: 'UPDATE', schema: 'public', table: 'games', filter: `id=eq.${gameId}` },
         (payload: { new: RealtimeGameChange }) => {
-          console.log('[Realtime] Game update received:', payload)
-          // Update only game status locally without reload
           if (payload.new.status) {
-            console.log('[Realtime] Updating status to:', payload.new.status)
             setGameStatus(payload.new.status as GameStatus)
           }
           if (payload.new.current_question_index !== undefined) {
-            console.log('[Realtime] Updating question index to:', payload.new.current_question_index)
             setCurrentQuestionIndex(payload.new.current_question_index)
           }
         }
@@ -253,73 +341,93 @@ export default function PlayerPage() {
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'questions', filter: `game_id=eq.${gameId}` },
-        (payload: unknown) => {
-          console.log('[Realtime] Question change received:', payload)
-          // Only reload current question
+        () => {
           loadCurrentQuestion()
         }
       )
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'players', filter: `game_id=eq.${gameId}` },
-        (payload: unknown) => {
-          console.log('[Realtime] Player change received:', payload)
-          // Only reload players list
-          loadPlayers()
-        }
-      )
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'answers' },
-        (payload: { new: RealtimeQuestionChange & RealtimePlayerChange; old: RealtimeQuestionChange & RealtimePlayerChange }) => {
-          const currentQuestionId = currentQuestionIdRef.current
-          const currentPlayerId = playerIdRef.current
-          const changedQuestionId = payload.new?.question_id ?? payload.old?.question_id
-          const changedPlayerId = payload.new?.player_id ?? payload.old?.player_id
+        (payload) => {
+          if (payload.eventType === 'DELETE') {
+            const deletedPlayerId = payload.old.id as string
+            setAllPlayers((current) => current.filter((player) => player.id !== deletedPlayerId))
 
-          if (
-            (currentQuestionId && changedQuestionId === currentQuestionId) ||
-            (currentPlayerId && changedPlayerId === currentPlayerId)
-          ) {
-            console.log('[Realtime] Answer change received:', payload)
-            loadCurrentQuestion()
+            if (deletedPlayerId === playerIdRef.current) {
+              clearPlayerSession()
+            }
+
+            return
           }
+
+          setAllPlayers((current) => sortPlayersByScore(upsertById(current, payload.new as Player)))
         }
       )
       .subscribe((status) => {
-        console.log('[Realtime] Subscription status:', status)
+        console.log('📡 [Player] Subscription status:', status)
+        if (status === 'SUBSCRIBED') {
+          setConnectionStatus('connected')
+          console.log('✅ [Player] Successfully subscribed to channel')
+        } else if (status === 'CHANNEL_ERROR') {
+          setConnectionStatus('disconnected')
+          console.error('❌ [Player] Channel error')
+        } else if (status === 'TIMED_OUT') {
+          setConnectionStatus('disconnected')
+          console.error('⏱️ [Player] Subscription timed out')
+        } else if (status === 'CLOSED') {
+          setConnectionStatus('disconnected')
+          console.warn('🚪 [Player] Channel closed')
+        }
       })
 
     return () => {
-      console.log('[Realtime] Unsubscribing from channel')
-      channel.unsubscribe()
+      supabase.removeChannel(channel)
     }
-  }, [gameId, loadCurrentQuestion, loadPlayers])
+  }, [clearPlayerSession, hasJoined, gameId, loadCurrentQuestion, loadGame, loadPlayers])
 
   useEffect(() => {
-    // Check if player already joined (using localStorage)
-    const savedPlayerId = localStorage.getItem(`player_${gameId}`)
-    if (savedPlayerId) {
-      setPlayerId(savedPlayerId)
-      setHasJoined(true)
-      loadGame()
+    if (!hasJoined || !playerId) return
+
+    markPlayerPresence(playerId, true)
+
+    const interval = window.setInterval(() => {
+      markPlayerPresence(playerId, true)
+    }, PRESENCE_HEARTBEAT_MS)
+
+    return () => {
+      window.clearInterval(interval)
+      markPlayerPresence(playerId, false)
     }
-  }, [gameId, loadGame])
+  }, [hasJoined, playerId, markPlayerPresence])
 
   useEffect(() => {
-    console.log('[useEffect] currentQuestionIndex changed:', currentQuestionIndex, 'game:', game)
+    if (!hasJoined) return
+
+    const handleForegroundResume = () => {
+      if (document.visibilityState !== 'visible') return
+
+      setConnectionStatus('connecting')
+      resyncGameState()
+
+      if (playerIdRef.current) {
+        markPlayerPresence(playerIdRef.current, true)
+      }
+    }
+
+    window.addEventListener('focus', handleForegroundResume)
+    document.addEventListener('visibilitychange', handleForegroundResume)
+
+    return () => {
+      window.removeEventListener('focus', handleForegroundResume)
+      document.removeEventListener('visibilitychange', handleForegroundResume)
+    }
+  }, [hasJoined, markPlayerPresence, resyncGameState])
+
+  useEffect(() => {
     if (game && currentQuestionIndex >= 0) {
-      console.log('[useEffect] Loading current question...')
       loadCurrentQuestion()
     }
   }, [currentQuestionIndex, game, loadCurrentQuestion])
-
-  useEffect(() => {
-    if (hasJoined) {
-      const cleanup = setupRealtimeSubscriptions()
-      return cleanup
-    }
-  }, [hasJoined, setupRealtimeSubscriptions])
 
   const handleJoin = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -341,12 +449,14 @@ export default function PlayerPage() {
       }
 
       // Check if pseudo already taken
-      const { data: existingPlayer } = await supabase
+      const { data: existingPlayer, error: existingPlayerError } = await supabase
         .from('players')
         .select('id')
         .eq('game_id', gameId)
         .eq('pseudo', pseudo)
-        .single()
+        .maybeSingle()
+
+      if (existingPlayerError) throw existingPlayerError
 
       if (existingPlayer) {
         setError('Ce pseudo est déjà pris')
@@ -354,16 +464,49 @@ export default function PlayerPage() {
         return
       }
 
-      // Create player
+      // Upload avatar to Storage if provided (OPTIMIZED: Upload once, reuse URL)
+      let avatarStoragePath = null
+      if (avatarUrl) {
+        try {
+          const blob = await dataUrlToBlob(avatarUrl)
+
+          // Create unique filename
+          const timestamp = Date.now()
+          const fileName = `${gameId}/${pseudo}_${timestamp}.jpg`
+
+          // Upload to Supabase Storage
+          const { error: uploadError } = await supabase.storage
+            .from('avatars')
+            .upload(fileName, blob, {
+              contentType: 'image/jpeg',
+              upsert: true
+            })
+
+          if (uploadError) {
+            console.error('Storage upload error:', uploadError)
+            // Continue without avatar if upload fails
+          } else {
+            avatarStoragePath = fileName
+            console.log('✅ Avatar uploaded to Storage:', fileName)
+          }
+        } catch (uploadError) {
+          console.error('Error uploading avatar:', uploadError)
+          // Continue without avatar if upload fails
+        }
+      }
+
+      // Create player with storage path (file uploaded once, URL reused everywhere)
       const { data: player, error: playerError } = await supabase
         .from('players')
         .insert([
           {
             game_id: gameId,
             pseudo: pseudo,
-            avatar_url: avatarUrl || null,
+            avatar_storage_path: avatarStoragePath,
+            avatar_url: null, // Deprecated field
             total_score: 0,
             connected: true,
+            last_seen: new Date().toISOString(),
           },
         ])
         .select()
@@ -377,7 +520,11 @@ export default function PlayerPage() {
       loadGame()
     } catch (error) {
       console.error('Error joining game:', error)
-      setError('Erreur lors de la connexion')
+      if (typeof error === 'object' && error && 'code' in error && error.code === '23505') {
+        setError('Ce pseudo est déjà pris')
+      } else {
+        setError('Erreur lors de la connexion')
+      }
     } finally {
       setLoading(false)
     }
@@ -421,10 +568,25 @@ export default function PlayerPage() {
     setLoading(true)
 
     try {
+      const { data: latestQuestion, error: latestQuestionError } = await supabase
+        .from('questions')
+        .select('id, status')
+        .eq('id', currentQuestion.id)
+        .maybeSingle()
+
+      if (latestQuestionError) throw latestQuestionError
+
+      if (!latestQuestion || latestQuestion.status !== 'open') {
+        await resyncGameState()
+        alert('La question a changé. Recharge de l’état en cours.')
+        return
+      }
+
       const { error } = await supabase
         .from('answers')
         .insert([
           {
+            game_id: gameId,  // CRITICAL: Required for real-time filtering
             question_id: currentQuestion.id,
             player_id: playerId,
             submitted_date: formattedDate,
@@ -436,10 +598,15 @@ export default function PlayerPage() {
       setSelectedDay('')
       setSelectedMonth('')
       setSelectedYear('')
-      loadCurrentQuestion()
+      await loadCurrentQuestion()
     } catch (error) {
       console.error('Error submitting answer:', error)
-      alert('Erreur lors de la soumission de la réponse')
+      if (typeof error === 'object' && error && 'code' in error && error.code === '23505') {
+        await loadCurrentQuestion()
+        alert('Réponse déjà envoyée')
+      } else {
+        alert('Erreur lors de la soumission de la réponse')
+      }
     } finally {
       setLoading(false)
     }
@@ -484,7 +651,7 @@ export default function PlayerPage() {
               <div className="flex items-center gap-4">
                 {avatarUrl && (
                   <div className="h-20 w-20 flex-shrink-0 overflow-hidden rounded-full border-4 border-[var(--brand)]">
-                    <img src={avatarUrl} alt="Avatar" className="w-full h-full object-cover" />
+                    <NextImage src={avatarUrl} alt="Avatar" width={80} height={80} unoptimized className="w-full h-full object-cover" />
                   </div>
                 )}
                 <label className="flex-1 cursor-pointer">
@@ -602,10 +769,18 @@ export default function PlayerPage() {
   return (
     <div className="app-shell p-4">
       <div className="max-w-md mx-auto pt-8">
+        {/* Connection status warning */}
+        {connectionStatus === 'disconnected' && (
+          <div className="mb-4 rounded-[22px] bg-red-500 px-6 py-3 text-center text-white shadow-lg">
+            <p className="font-bold">⚠️ Connexion perdue</p>
+            <p className="text-sm">Reconnexion...</p>
+          </div>
+        )}
+
         <div className="glass-panel mb-4 rounded-[32px] p-6">
           <div className="flex justify-between items-center mb-4">
             <span className="text-sm font-black uppercase tracking-[0.18em] text-[var(--ink-3)]">
-              Question {currentQuestion.question_number} / 10
+              Question {currentQuestion.question_number} / {questionCount || '?'}
             </span>
             <span className="text-sm font-black uppercase tracking-[0.18em] text-[var(--ink-3)]">
               Score: {formatScore(allPlayers.find(p => p.id === playerId)?.total_score)}

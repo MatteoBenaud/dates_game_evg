@@ -17,6 +17,7 @@ export type Database = {
       answers: {
         Row: {
           created_at: string | null
+          game_id: string
           id: string
           player_id: string
           question_id: string
@@ -25,6 +26,7 @@ export type Database = {
         }
         Insert: {
           created_at?: string | null
+          game_id: string
           id?: string
           player_id: string
           question_id: string
@@ -33,6 +35,7 @@ export type Database = {
         }
         Update: {
           created_at?: string | null
+          game_id?: string
           id?: string
           player_id?: string
           question_id?: string
@@ -40,6 +43,13 @@ export type Database = {
           submitted_date?: string
         }
         Relationships: [
+          {
+            foreignKeyName: "answers_game_id_fkey"
+            columns: ["game_id"]
+            isOneToOne: false
+            referencedRelation: "games"
+            referencedColumns: ["id"]
+          },
           {
             foreignKeyName: "answers_player_id_fkey"
             columns: ["player_id"]
@@ -85,29 +95,35 @@ export type Database = {
       }
       players: {
         Row: {
+          avatar_storage_path: string | null
           avatar_url: string | null
           connected: boolean | null
           game_id: string
           id: string
           joined_at: string | null
+          last_seen: string
           pseudo: string
           total_score: number | null
         }
         Insert: {
+          avatar_storage_path?: string | null
           avatar_url?: string | null
           connected?: boolean | null
           game_id: string
           id?: string
           joined_at?: string | null
+          last_seen?: string
           pseudo: string
           total_score?: number | null
         }
         Update: {
+          avatar_storage_path?: string | null
           avatar_url?: string | null
           connected?: boolean | null
           game_id?: string
           id?: string
           joined_at?: string | null
+          last_seen?: string
           pseudo?: string
           total_score?: number | null
         }
@@ -128,6 +144,7 @@ export type Database = {
           game_id: string
           id: string
           image_data_url: string | null
+          image_storage_path: string | null
           question_number: number
           status: string
           text: string
@@ -138,6 +155,7 @@ export type Database = {
           game_id: string
           id?: string
           image_data_url?: string | null
+          image_storage_path?: string | null
           question_number: number
           status?: string
           text: string
@@ -148,6 +166,7 @@ export type Database = {
           game_id?: string
           id?: string
           image_data_url?: string | null
+          image_storage_path?: string | null
           question_number?: number
           status?: string
           text?: string
@@ -170,16 +189,20 @@ export type Database = {
       generate_game_code: { Args: never; Returns: string }
       get_games_with_stats: {
         Args: never
-        Returns: Array<{
-          id: string
+        Returns: {
           code: string
-          status: string
-          created_at: string | null
+          created_at: string
           current_question_index: number
-          host_ready: boolean | null
+          host_ready: boolean
+          id: string
           player_count: number
           question_count: number
-        }>
+          status: string
+        }[]
+      }
+      reveal_question: {
+        Args: { p_correct_date: string; p_question_id: string }
+        Returns: undefined
       }
     }
     Enums: {

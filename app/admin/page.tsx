@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
+import { logoutAdmin } from '@/app/admin/actions'
 import { supabase } from '@/lib/supabase'
 import { GameStatus } from '@/types/game.types'
 
@@ -61,6 +62,9 @@ export default function AdminDashboard() {
     if (!confirm('Êtes-vous sûr de vouloir supprimer cette partie ?')) return
 
     try {
+      await supabase.from('answers').delete().eq('game_id', gameId)
+      await supabase.from('players').delete().eq('game_id', gameId)
+      await supabase.from('questions').delete().eq('game_id', gameId)
       await supabase.from('games').delete().eq('id', gameId)
       loadGames()
     } catch (error) {
@@ -109,7 +113,8 @@ export default function AdminDashboard() {
           game_id: newGame.id,
           question_number: q.question_number,
           text: q.text,
-          image_data_url: q.image_data_url,
+          image_data_url: null,
+          image_storage_path: q.image_storage_path,
           correct_date: q.correct_date,
           status: 'locked',
         }))
@@ -210,6 +215,14 @@ export default function AdminDashboard() {
             >
               Nouvelle partie
             </button>
+            <form action={logoutAdmin}>
+              <button
+                type="submit"
+                className="action-ghost rounded-[18px] px-6 py-3 text-sm font-black uppercase tracking-[0.2em]"
+              >
+                Déconnexion
+              </button>
+            </form>
           </div>
         </div>
 

@@ -1,12 +1,15 @@
 'use client'
 
+import NextImage from 'next/image'
 import { formatScore } from '@/utils/score'
+import { getPlayerAvatarUrl } from '@/utils/storage'
 
 interface Player {
   id: string
   pseudo: string
   total_score: number | null
   avatar_url?: string | null
+  avatar_storage_path?: string | null
 }
 
 interface AnimatedLeaderboardProps {
@@ -35,6 +38,7 @@ export default function AnimatedLeaderboard({ players }: AnimatedLeaderboardProp
       {sortedPlayers.map((player, index) => {
         const score = player.total_score
         const progress = maxScoreValue === 0 ? 0 : Math.max(12, (score / maxScoreValue) * 100)
+        const avatarUrl = getPlayerAvatarUrl(player)
         const rankTones = [
           'from-amber-300 via-amber-400 to-orange-500',
           'from-slate-200 via-slate-300 to-slate-400',
@@ -62,10 +66,13 @@ export default function AnimatedLeaderboard({ players }: AnimatedLeaderboardProp
                 {badge()}
               </div>
               <div className="h-14 w-14 shrink-0 overflow-hidden rounded-2xl border border-white/80 bg-white shadow-md">
-                {player.avatar_url ? (
-                  <img
-                    src={player.avatar_url}
+                {avatarUrl ? (
+                  <NextImage
+                    src={avatarUrl}
                     alt={player.pseudo}
+                    width={56}
+                    height={56}
+                    unoptimized
                     className="h-full w-full object-cover"
                   />
                 ) : (

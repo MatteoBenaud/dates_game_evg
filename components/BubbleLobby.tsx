@@ -1,12 +1,17 @@
 'use client'
 
+import NextImage from 'next/image'
 import { useEffect, useRef, useState } from 'react'
+import { getAvatarUrl } from '@/utils/storage'
+import { isPlayerConsideredConnected } from '@/utils/presence'
 
 interface Player {
   id: string
   pseudo: string
-  avatar_url?: string | null
+  avatar_url?: string | null // Deprecated
+  avatar_storage_path?: string | null // New
   connected: boolean | null
+  last_seen?: string | null
 }
 
 interface Bubble {
@@ -26,6 +31,7 @@ interface BubbleLobbyProps {
 export default function BubbleLobby({ players }: BubbleLobbyProps) {
   const canvasRef = useRef<HTMLDivElement>(null)
   const [bubbles, setBubbles] = useState<Bubble[]>([])
+  const [, setPresenceTick] = useState(0)
   const bubblesRef = useRef<Bubble[]>([])
   const animationRef = useRef<number | undefined>(undefined)
 
@@ -151,6 +157,16 @@ export default function BubbleLobby({ players }: BubbleLobbyProps) {
     }
   }, [bubbles.length])
 
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      setPresenceTick((current) => current + 1)
+    }, 5_000)
+
+    return () => {
+      window.clearInterval(interval)
+    }
+  }, [])
+
   return (
     <div
       ref={canvasRef}
@@ -172,19 +188,25 @@ export default function BubbleLobby({ players }: BubbleLobbyProps) {
 
             {/* Main bubble */}
             <div className="relative flex h-32 w-32 items-center justify-center overflow-hidden rounded-full border-4 border-white bg-gradient-to-br from-white to-[rgba(216,87,42,0.18)] shadow-2xl">
-              {bubble.player.avatar_url ? (
-                <img
-                  src={bubble.player.avatar_url}
-                  alt={bubble.player.pseudo}
-                  className="w-full h-full object-cover"
-                />
-              ) : (
-                <div className="flex h-full w-full items-center justify-center bg-gradient-to-br from-[var(--brand)] to-[var(--brand-strong)]">
-                  <span className="text-4xl font-bold text-white">
-                    {bubble.player.pseudo.charAt(0).toUpperCase()}
-                  </span>
-                </div>
-              )}
+              {(() => {
+                // OPTIMIZED: Get URL from Storage (uploaded once, reused everywhere)
+                const avatarUrl = getAvatarUrl(bubble.player.avatar_storage_path || null) || bubble.player.avatar_url
+                return avatarUrl ? (
+                  <NextImage
+                    src={avatarUrl}
+                    alt={bubble.player.pseudo}
+                    fill
+                    unoptimized
+                    className="w-full h-full object-cover"
+                  />
+                ) : (
+                  <div className="flex h-full w-full items-center justify-center bg-gradient-to-br from-[var(--brand)] to-[var(--brand-strong)]">
+                    <span className="text-4xl font-bold text-white">
+                      {bubble.player.pseudo.charAt(0).toUpperCase()}
+                    </span>
+                  </div>
+                )
+              })()}
 
               {/* Shine effect */}
               <div className="absolute top-4 left-4 w-8 h-8 rounded-full bg-white opacity-40 blur-sm" />
@@ -200,7 +222,7 @@ export default function BubbleLobby({ players }: BubbleLobbyProps) {
             {/* Connection status indicator */}
             <div className="absolute top-0 right-0 w-6 h-6">
               <div className={`w-full h-full rounded-full border-2 border-white ${
-                bubble.player.connected ? 'bg-emerald-500' : 'bg-red-500'
+                isPlayerConsideredConnected(bubble.player) ? 'bg-emerald-500' : 'bg-red-500'
               }`} />
             </div>
           </div>

@@ -3,9 +3,11 @@
 import { ChangeEvent, useState, useEffect, useCallback } from 'react'
 import NextImage from 'next/image'
 import { useParams, useRouter } from 'next/navigation'
+import { logoutAdmin } from '@/app/admin/actions'
 import { supabase } from '@/lib/supabase'
 import { GameStatus, QuestionStatus } from '@/types/game.types'
 import { formatScore } from '@/utils/score'
+import { dataUrlToBlob, getQuestionImageUrl, uploadQuestionImage } from '@/utils/storage'
 
 const MAX_QUESTION_IMAGE_BYTES = 1_500_000
 const MAX_QUESTION_IMAGE_DIMENSION = 1600
@@ -64,6 +66,8 @@ interface Player {
   connected: boolean | null
   joined_at: string | null
   avatar_url?: string | null
+  avatar_storage_path?: string | null
+  last_seen?: string
   game_id?: string
 }
 
@@ -72,8 +76,26 @@ interface Question {
   question_number: number
   text: string
   image_data_url: string | null
+  image_storage_path: string | null
   correct_date: string
   status: QuestionStatus
+}
+
+function sortPlayersByScore(items: Player[]) {
+  return [...items].sort((a, b) => (a.total_score || 0) - (b.total_score || 0))
+}
+
+function sortQuestionsByNumber(items: Question[]) {
+  return [...items].sort((a, b) => a.question_number - b.question_number)
+}
+
+function upsertById<T extends { id: string }>(items: T[], nextItem: T) {
+  const index = items.findIndex((item) => item.id === nextItem.id)
+  if (index === -1) return [...items, nextItem]
+
+  const nextItems = [...items]
+  nextItems[index] = nextItem
+  return nextItems
 }
 
 export default function AdminGamePage() {
@@ -91,6 +113,8 @@ export default function AdminGamePage() {
   const [editedText, setEditedText] = useState('')
   const [editedDate, setEditedDate] = useState('')
   const [editedImageDataUrl, setEditedImageDataUrl] = useState('')
+  const [editedImageStoragePath, setEditedImageStoragePath] = useState<string | null>(null)
+  const [editedImageChanged, setEditedImageChanged] = useState(false)
   const [editUploadKey, setEditUploadKey] = useState(0)
 
   // Add question states
@@ -98,6 +122,7 @@ export default function AdminGamePage() {
   const [newQuestionText, setNewQuestionText] = useState('')
   const [newQuestionDate, setNewQuestionDate] = useState('')
   const [newQuestionImageDataUrl, setNewQuestionImageDataUrl] = useState('')
+  const [newQuestionImageStoragePath, setNewQuestionImageStoragePath] = useState<string | null>(null)
   const [newUploadKey, setNewUploadKey] = useState(0)
   const [isAdding, setIsAdding] = useState(false)
   const [uploadingImageTarget, setUploadingImageTarget] = useState<'new' | 'edit' | null>(null)
@@ -123,7 +148,7 @@ export default function AdminGamePage() {
 
     if (error) throw error
 
-    setPlayers(playersData || [])
+    setPlayers(sortPlayersByScore(playersData || []))
   }, [gameId])
 
   const loadQuestions = useCallback(async () => {
@@ -135,7 +160,7 @@ export default function AdminGamePage() {
 
     if (error) throw error
 
-    setQuestions((questionsData || []).map(q => ({ ...q, status: q.status as QuestionStatus })))
+    setQuestions(sortQuestionsByNumber((questionsData || []).map(q => ({ ...q, status: q.status as QuestionStatus }))))
   }, [gameId])
 
   const loadGame = useCallback(async () => {
@@ -153,6 +178,13 @@ export default function AdminGamePage() {
 
     const channel = supabase
       .channel(`admin:${gameId}`)
+      // Monitor connection status
+      .on('system', { event: 'connected' }, () => {
+        console.log('✅ [Admin] Real-time connection established')
+      })
+      .on('system', { event: 'disconnected' }, () => {
+        console.warn('⚠️ [Admin] Real-time connection lost')
+      })
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'games', filter: `id=eq.${gameId}` },
@@ -163,15 +195,30 @@ export default function AdminGamePage() {
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'players', filter: `game_id=eq.${gameId}` },
-        async () => {
-          await loadPlayers()
+        (payload) => {
+          if (payload.eventType === 'DELETE') {
+            setPlayers((current) => current.filter((player) => player.id !== payload.old.id))
+            return
+          }
+
+          setPlayers((current) => sortPlayersByScore(upsertById(current, payload.new as Player)))
         }
       )
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'questions', filter: `game_id=eq.${gameId}` },
-        async () => {
-          await loadQuestions()
+        (payload) => {
+          if (payload.eventType === 'DELETE') {
+            setQuestions((current) => current.filter((question) => question.id !== payload.old.id))
+            return
+          }
+
+          const nextQuestion = {
+            ...(payload.new as Question),
+            status: (payload.new.status as QuestionStatus) || 'locked',
+          }
+
+          setQuestions((current) => sortQuestionsByNumber(upsertById(current, nextQuestion)))
         }
       )
       .subscribe()
@@ -186,7 +233,9 @@ export default function AdminGamePage() {
     setEditingQuestion(question.id)
     setEditedText(question.text)
     setEditedDate(question.correct_date)
-    setEditedImageDataUrl(question.image_data_url || '')
+    setEditedImageDataUrl(getQuestionImageUrl(question.image_storage_path) || question.image_data_url || '')
+    setEditedImageStoragePath(question.image_storage_path)
+    setEditedImageChanged(false)
     setEditUploadKey((key) => key + 1)
   }
 
@@ -209,8 +258,11 @@ export default function AdminGamePage() {
 
       if (target === 'new') {
         setNewQuestionImageDataUrl(compressedImage)
+        setNewQuestionImageStoragePath(null)
       } else {
         setEditedImageDataUrl(compressedImage)
+        setEditedImageStoragePath(null)
+        setEditedImageChanged(true)
       }
     } catch (error) {
       console.error('Error processing question image:', error)
@@ -222,18 +274,33 @@ export default function AdminGamePage() {
 
   const handleSaveQuestion = async (questionId: string) => {
     try {
+      const question = questions.find((item) => item.id === questionId)
+      if (!question) return
+
+      let nextImageStoragePath = editedImageStoragePath
+      if (editedImageChanged) {
+        if (editedImageDataUrl) {
+          const blob = await dataUrlToBlob(editedImageDataUrl)
+          nextImageStoragePath = await uploadQuestionImage(gameId, question.question_number, blob)
+        } else {
+          nextImageStoragePath = null
+        }
+      }
+
       await supabase
         .from('questions')
         .update({
           text: editedText,
           correct_date: editedDate,
-          image_data_url: editedImageDataUrl || null,
+          image_data_url: null,
+          image_storage_path: nextImageStoragePath,
         })
         .eq('id', questionId)
 
       setEditingQuestion(null)
       setEditedImageDataUrl('')
-      loadGame()
+      setEditedImageStoragePath(null)
+      setEditedImageChanged(false)
     } catch (error) {
       console.error('Error saving question:', error)
     }
@@ -257,12 +324,19 @@ export default function AdminGamePage() {
 
     try {
       const newQuestionNumber = questions.length + 1
+      let imageStoragePath = newQuestionImageStoragePath
+
+      if (newQuestionImageDataUrl) {
+        const blob = await dataUrlToBlob(newQuestionImageDataUrl)
+        imageStoragePath = await uploadQuestionImage(gameId, newQuestionNumber, blob)
+      }
 
       await supabase.from('questions').insert([{
         game_id: gameId,
         question_number: newQuestionNumber,
         text: newQuestionText,
-        image_data_url: newQuestionImageDataUrl || null,
+        image_data_url: null,
+        image_storage_path: imageStoragePath,
         correct_date: newQuestionDate,
         status: 'locked',
       }])
@@ -270,9 +344,9 @@ export default function AdminGamePage() {
       setNewQuestionText('')
       setNewQuestionDate('')
       setNewQuestionImageDataUrl('')
+      setNewQuestionImageStoragePath(null)
       setNewUploadKey((key) => key + 1)
       setShowAddForm(false)
-      loadGame()
     } catch (error) {
       console.error('Error adding question:', error)
       alert('Erreur lors de l\'ajout de la question')
@@ -294,6 +368,11 @@ export default function AdminGamePage() {
           current_question_index: 0
         })
         .eq('id', gameId)
+
+      await supabase
+        .from('answers')
+        .delete()
+        .eq('game_id', gameId)
 
       // Delete all players
       await supabase
@@ -372,6 +451,14 @@ export default function AdminGamePage() {
               </p>
             </div>
             <div className="flex gap-3">
+              <form action={logoutAdmin}>
+                <button
+                  type="submit"
+                  className="rounded-lg border border-[var(--line-soft)] bg-white px-6 py-3 font-semibold text-[var(--ink-1)] transition-colors hover:bg-gray-50"
+                >
+                  Déconnexion
+                </button>
+              </form>
               <button
                 onClick={handleExportResults}
                 className="bg-green-600 hover:bg-green-700 text-white font-semibold px-6 py-3 rounded-lg transition-colors"
@@ -471,6 +558,7 @@ export default function AdminGamePage() {
                         type="button"
                         onClick={() => {
                           setNewQuestionImageDataUrl('')
+                          setNewQuestionImageStoragePath(null)
                           setNewUploadKey((key) => key + 1)
                         }}
                         className="text-sm font-medium text-red-600 hover:text-red-700"
@@ -537,6 +625,8 @@ export default function AdminGamePage() {
                                 type="button"
                                 onClick={() => {
                                   setEditedImageDataUrl('')
+                                  setEditedImageStoragePath(null)
+                                  setEditedImageChanged(true)
                                   setEditUploadKey((key) => key + 1)
                                 }}
                                 className="text-sm font-medium text-red-600 hover:text-red-700"
@@ -573,9 +663,9 @@ export default function AdminGamePage() {
                           <div className="flex-1">
                             <span className="font-bold text-gray-700">Q{question.question_number}.</span>
                             <p className="text-gray-900 mt-1">{question.text}</p>
-                            {question.image_data_url && (
+                            {(getQuestionImageUrl(question.image_storage_path) || question.image_data_url) && (
                               <NextImage
-                                src={question.image_data_url}
+                                src={getQuestionImageUrl(question.image_storage_path) || question.image_data_url || ''}
                                 alt={`Illustration pour la question ${question.question_number}`}
                                 width={1600}
                                 height={900}

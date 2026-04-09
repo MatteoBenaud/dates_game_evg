@@ -6,7 +6,7 @@ import { flushSync } from 'react-dom'
 import { useParams, useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import { GameStatus, QuestionStatus } from '@/types/game.types'
-import { calculateMissingAnswerScore, calculateScore } from '@/utils/score'
+import { getAvatarUrl, getQuestionImageUrl } from '@/utils/storage'
 import AnimatedLeaderboard from '@/components/AnimatedLeaderboard'
 import BubbleLobby from '@/components/BubbleLobby'
 import TimelineReveal from '@/components/TimelineReveal'
@@ -16,7 +16,10 @@ interface Player {
   pseudo: string
   total_score: number | null
   connected: boolean | null
-  avatar_url?: string | null
+  joined_at?: string | null
+  avatar_url?: string | null // Deprecated
+  avatar_storage_path?: string | null // New: Storage path
+  last_seen?: string
 }
 
 interface Question {
@@ -24,6 +27,7 @@ interface Question {
   question_number: number
   text: string
   image_data_url: string | null
+  image_storage_path: string | null
   correct_date: string
   status: QuestionStatus
 }
@@ -35,8 +39,25 @@ interface Answer {
   score: number | null
 }
 
-interface RealtimeQuestionChange {
-  question_id?: string
+function sortPlayersByJoinedAt(items: Player[]) {
+  return [...items].sort((a, b) => {
+    const left = a.joined_at ? new Date(a.joined_at).getTime() : 0
+    const right = b.joined_at ? new Date(b.joined_at).getTime() : 0
+    return left - right
+  })
+}
+
+function sortQuestionsByNumber(items: Question[]) {
+  return [...items].sort((a, b) => a.question_number - b.question_number)
+}
+
+function upsertById<T extends { id: string }>(items: T[], nextItem: T) {
+  const index = items.findIndex((item) => item.id === nextItem.id)
+  if (index === -1) return [...items, nextItem]
+
+  const nextItems = [...items]
+  nextItems[index] = nextItem
+  return nextItems
 }
 
 function waitForNextPaint() {
@@ -60,31 +81,51 @@ export default function HostPage() {
   const [showTimeline, setShowTimeline] = useState(false)
   const [showLeaderboard, setShowLeaderboard] = useState(false)
   const [isPreparingReveal, setIsPreparingReveal] = useState(false)
+  const [connectionStatus, setConnectionStatus] = useState<'connected' | 'disconnected'>('disconnected')
+
+  // KAHOOT PATTERN: Use refs to avoid dependency loops
   const currentQuestionIdRef = useRef<string | null>(null)
+  const previousQuestionStatusRef = useRef<QuestionStatus | null>(null)
+
   useEffect(() => {
     currentQuestionIdRef.current = questions[currentQuestionIndex]?.id ?? null
   }, [questions, currentQuestionIndex])
 
   useEffect(() => {
     const status = questions[currentQuestionIndex]?.status
+    const previousStatus = previousQuestionStatusRef.current
 
-    if (status === 'revealed' && !showTimeline) {
-      setShowLeaderboard(true)
+    if (status === 'revealed') {
+      const didTransitionToReveal = previousStatus !== null && previousStatus !== 'revealed'
+
+      if (!didTransitionToReveal && !showTimeline && !isPreparingReveal) {
+        setShowLeaderboard(true)
+      }
+
+      previousQuestionStatusRef.current = status
       return
     }
 
-    if (status !== 'revealed') {
-      setShowLeaderboard(false)
+    if (status) {
+      previousQuestionStatusRef.current = status
     }
-  }, [questions, currentQuestionIndex, showTimeline])
+
+    setShowLeaderboard(false)
+  }, [questions, currentQuestionIndex, showTimeline, isPreparingReveal])
 
   const loadAnswers = useCallback(async (questionId: string) => {
     if (!questionId) return
 
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from('answers')
       .select('*')
       .eq('question_id', questionId)
+      .order('created_at', { ascending: true })
+
+    if (error) {
+      console.error('Error loading answers:', error)
+      return
+    }
 
     setAnswers(data || [])
   }, [])
@@ -117,7 +158,7 @@ export default function HostPage() {
         .eq('game_id', gameId)
         .order('joined_at', { ascending: true })
 
-      setPlayers(playersData || [])
+      setPlayers(sortPlayersByJoinedAt(playersData || []))
 
       // Load questions
       const { data: questionsData } = await supabase
@@ -126,10 +167,10 @@ export default function HostPage() {
         .eq('game_id', gameId)
         .order('question_number', { ascending: true })
 
-      setQuestions((questionsData || []).map(q => ({
+      setQuestions(sortQuestionsByNumber((questionsData || []).map(q => ({
         ...q,
         status: q.status as QuestionStatus
-      })))
+      }))))
 
       // Load answers for current question
       if (questionsData && questionsData.length > 0) {
@@ -143,31 +184,45 @@ export default function HostPage() {
     }
   }, [gameId, loadAnswers])
 
-  const setupRealtimeSubscriptions = useCallback(() => {
+  // KAHOOT PATTERN: Single subscription setup, no callbacks, dependencies in refs
+  useEffect(() => {
+    // Load initial game data
+    loadGame()
+
+    // Setup real-time listeners
     const channel = supabase
       .channel(`game:${gameId}`)
+      .on('system', { event: 'connected' }, () => {
+        setConnectionStatus('connected')
+        console.log('✅ [Host] Real-time connected')
+      })
+      .on('system', { event: 'disconnected' }, () => {
+        setConnectionStatus('disconnected')
+        console.warn('⚠️ [Host] Real-time disconnected (may reconnect automatically)')
+      })
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'players', filter: `game_id=eq.${gameId}` },
-        async () => {
-          // Only reload players, not entire game
-          const { data: playersData } = await supabase
-            .from('players')
-            .select('*')
-            .eq('game_id', gameId)
-            .order('joined_at', { ascending: true })
-          setPlayers(playersData || [])
+        (payload) => {
+          console.log('🔔 Player change detected:', payload.eventType)
+
+          if (payload.eventType === 'DELETE') {
+            setPlayers((current) => current.filter((player) => player.id !== payload.old.id))
+            return
+          }
+
+          const nextPlayer = payload.new as Player
+          setPlayers((current) => sortPlayersByJoinedAt(upsertById(current, nextPlayer)))
         }
       )
       .on(
         'postgres_changes',
-        { event: '*', schema: 'public', table: 'answers' },
-        async (payload: { new: RealtimeQuestionChange; old: RealtimeQuestionChange }) => {
+        { event: 'INSERT', schema: 'public', table: 'answers', filter: `game_id=eq.${gameId}` },
+        (payload) => {
           const currentQuestionId = currentQuestionIdRef.current
-          const changedQuestionId = payload.new?.question_id ?? payload.old?.question_id
-
-          if (currentQuestionId && changedQuestionId === currentQuestionId) {
-            await loadAnswers(currentQuestionId)
+          if (payload.new?.question_id === currentQuestionId) {
+            console.log('🔔 Answer received')
+            setAnswers((current) => upsertById(current, payload.new as Answer))
           }
         }
       )
@@ -175,7 +230,6 @@ export default function HostPage() {
         'postgres_changes',
         { event: 'UPDATE', schema: 'public', table: 'games', filter: `id=eq.${gameId}` },
         (payload) => {
-          // Update status and index locally without full reload
           if (payload.new.status) {
             setGameStatus(payload.new.status as GameStatus)
           }
@@ -187,31 +241,37 @@ export default function HostPage() {
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'questions', filter: `game_id=eq.${gameId}` },
-        async () => {
-          // Only reload questions list
-          const { data: questionsData } = await supabase
-            .from('questions')
-            .select('*')
-            .eq('game_id', gameId)
-            .order('question_number', { ascending: true })
-          setQuestions((questionsData || []).map(q => ({
-            ...q,
-            status: q.status as QuestionStatus
-          })))
+        (payload) => {
+          if (payload.eventType === 'DELETE') {
+            setQuestions((current) => current.filter((question) => question.id !== payload.old.id))
+            return
+          }
+
+          const nextQuestion = {
+            ...(payload.new as Question),
+            status: (payload.new.status as QuestionStatus) || 'locked',
+          }
+
+          setQuestions((current) => sortQuestionsByNumber(upsertById(current, nextQuestion)))
         }
       )
-      .subscribe()
+      .subscribe((status) => {
+        console.log('📡 [Host] Subscription status:', status)
+        if (status === 'SUBSCRIBED') {
+          console.log('✅ [Host] Successfully subscribed to channel')
+        } else if (status === 'CHANNEL_ERROR') {
+          console.error('❌ [Host] Channel error')
+        } else if (status === 'TIMED_OUT') {
+          console.error('⏱️ [Host] Subscription timed out')
+        } else if (status === 'CLOSED') {
+          console.warn('🚪 [Host] Channel closed')
+        }
+      })
 
     return () => {
-      channel.unsubscribe()
+      supabase.removeChannel(channel)
     }
-  }, [gameId, loadAnswers])
-
-  useEffect(() => {
-    loadGame()
-    const cleanup = setupRealtimeSubscriptions()
-    return cleanup
-  }, [gameId, loadGame, setupRealtimeSubscriptions])
+  }, [gameId, loadGame])
 
   useEffect(() => {
     const currentQuestionId = questions[currentQuestionIndex]?.id
@@ -256,59 +316,46 @@ export default function HostPage() {
     if (!currentQuestion) return
 
     try {
-      const scoredAnswers = answers.map((answer) => ({
-        ...answer,
-        score: calculateScore(answer.submitted_date, currentQuestion.correct_date),
-      }))
-      const missingAnswerScore = calculateMissingAnswerScore(
-        scoredAnswers.map((answer) => answer.score || 0)
-      )
-      const roundScores = new Map<string, number>()
-
-      for (const answer of scoredAnswers) {
-        roundScores.set(answer.player_id, answer.score || 0)
-      }
-
-      const updatedPlayers = players.map((player) => ({
-        ...player,
-        total_score: (player.total_score || 0) + (roundScores.get(player.id) ?? missingAnswerScore),
-      }))
-
-      // Force an immediate visual transition before mounting the heavy reveal screen.
+      // Show preparing state
       flushSync(() => {
-        setAnswers(scoredAnswers)
-        setPlayers(updatedPlayers)
         setShowLeaderboard(false)
         setIsPreparingReveal(true)
       })
 
       await waitForNextPaint()
+
+      // OPTIMIZED: Use single RPC call instead of 40+ UPDATE queries
+      const { error: rpcError } = await supabase.rpc('reveal_question', {
+        p_question_id: currentQuestion.id,
+        p_correct_date: currentQuestion.correct_date
+      })
+
+      if (rpcError) {
+        console.error('RPC error:', rpcError)
+        throw rpcError
+      }
+
+      // Reload answers and players after reveal (scores are now calculated)
+      const [answersResult, playersResult] = await Promise.all([
+        supabase.from('answers').select('*').eq('question_id', currentQuestion.id),
+        supabase.from('players').select('*').eq('game_id', gameId).order('joined_at', { ascending: true })
+      ])
+
+      const scoredAnswers = answersResult.data || []
+      const updatedPlayers = playersResult.data || []
+
+      // Update UI with database results
       flushSync(() => {
+        setAnswers(scoredAnswers)
+        setPlayers(updatedPlayers)
         setShowTimeline(true)
         setIsPreparingReveal(false)
       })
-      await waitForNextPaint()
 
-      await Promise.all([
-        ...scoredAnswers.map((answer) =>
-          supabase
-            .from('answers')
-            .update({ score: answer.score })
-            .eq('id', answer.id)
-        ),
-        ...updatedPlayers.map((player) =>
-          supabase
-            .from('players')
-            .update({ total_score: player.total_score })
-            .eq('id', player.id)
-        ),
-        supabase
-          .from('questions')
-          .update({ status: 'revealed' })
-          .eq('id', currentQuestion.id),
-      ])
+      await waitForNextPaint()
     } catch (error) {
       console.error('Error revealing question:', error)
+      setIsPreparingReveal(false)
     }
   }
 
@@ -453,11 +500,11 @@ export default function HostPage() {
   }
 
   // Game phase
-  const answeredCount = answers.length
-  const totalPlayers = players.length
   const answeredPlayerIds = new Set(answers.map((answer) => answer.player_id))
+  const answeredCount = answeredPlayerIds.size
+  const totalPlayers = players.length
 
-  if (currentQuestionStatus === 'revealed' && showLeaderboard) {
+  if (currentQuestionStatus === 'revealed' && showLeaderboard && !showTimeline) {
     return (
       <div className="app-shell px-4 py-6 md:px-8">
         <div className="mx-auto max-w-6xl">
@@ -486,6 +533,14 @@ export default function HostPage() {
   return (
     <div className="app-shell px-4 py-6 md:px-8">
       <div className="max-w-6xl mx-auto">
+        {/* Connection status warning */}
+        {connectionStatus === 'disconnected' && (
+          <div className="mb-4 rounded-[22px] bg-red-500 px-6 py-3 text-center text-white shadow-lg">
+            <p className="font-bold">⚠️ Connexion temps réel perdue</p>
+            <p className="text-sm">Reconnexion en cours...</p>
+          </div>
+        )}
+
         <div className="glass-panel mb-6 rounded-[32px] p-8">
           <div className="flex justify-between items-center mb-6">
             <h1 className="section-title text-4xl font-black text-[var(--ink-1)]">
@@ -500,10 +555,10 @@ export default function HostPage() {
           <div className="metric-card mb-6 rounded-[28px] p-6">
             <p className="text-[11px] font-black uppercase tracking-[0.28em] text-[var(--ink-3)]">Question en cours</p>
             <p className="mt-3 text-3xl font-black text-[var(--ink-1)]">{currentQuestion?.text}</p>
-            {currentQuestion?.image_data_url && (
+            {(getQuestionImageUrl(currentQuestion?.image_storage_path || null) || currentQuestion?.image_data_url) && (
               <div className="mt-6 overflow-hidden rounded-[24px] border border-[var(--line-soft)] bg-white/80 p-4">
                 <NextImage
-                  src={currentQuestion.image_data_url}
+                  src={getQuestionImageUrl(currentQuestion.image_storage_path) || currentQuestion.image_data_url || ''}
                   alt={`Illustration de la question ${currentQuestionIndex + 1}`}
                   width={1600}
                   height={900}
@@ -552,20 +607,24 @@ export default function HostPage() {
                     }`}
                   >
                     <div className="relative h-11 w-11 shrink-0 overflow-hidden rounded-full border border-white/80 bg-[rgba(23,32,51,0.08)]">
-                      {player.avatar_url ? (
-                        <NextImage
-                          src={player.avatar_url}
-                          alt={player.pseudo}
-                          fill
-                          unoptimized
-                          sizes="44px"
-                          className="object-cover"
-                        />
-                      ) : (
-                        <div className="flex h-full w-full items-center justify-center bg-gradient-to-br from-[var(--brand)] to-[var(--brand-strong)] text-sm font-black text-white">
-                          {player.pseudo.charAt(0).toUpperCase()}
-                        </div>
-                      )}
+                      {(() => {
+                        // OPTIMIZED: Get URL from Storage (uploaded once, reused everywhere)
+                        const avatarUrl = getAvatarUrl(player.avatar_storage_path || null) || player.avatar_url
+                        return avatarUrl ? (
+                          <NextImage
+                            src={avatarUrl}
+                            alt={player.pseudo}
+                            fill
+                            unoptimized
+                            sizes="44px"
+                            className="object-cover"
+                          />
+                        ) : (
+                          <div className="flex h-full w-full items-center justify-center bg-gradient-to-br from-[var(--brand)] to-[var(--brand-strong)] text-sm font-black text-white">
+                            {player.pseudo.charAt(0).toUpperCase()}
+                          </div>
+                        )
+                      })()}
 
                       <span
                         className={`absolute bottom-0 right-0 h-3.5 w-3.5 rounded-full border-2 border-white ${

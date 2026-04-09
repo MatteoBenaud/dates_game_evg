@@ -1,12 +1,15 @@
 'use client'
 
+import NextImage from 'next/image'
 import { useEffect, useState } from 'react'
 import { formatScore } from '@/utils/score'
+import { getPlayerAvatarUrl } from '@/utils/storage'
 
 interface Player {
   id: string
   pseudo: string
   avatar_url?: string | null
+  avatar_storage_path?: string | null
 }
 
 interface Answer {
@@ -61,7 +64,7 @@ export default function TimelineReveal({ correctDate, answers, players, onComple
         return {
           id: answer.id,
           pseudo: player?.pseudo || 'Joueur mystere',
-          avatar_url: player?.avatar_url,
+          avatar_url: player ? getPlayerAvatarUrl(player) : null,
           submitted_date: answer.submitted_date,
           score: answer.score || 0,
           diffDays,
@@ -311,7 +314,7 @@ export default function TimelineReveal({ correctDate, answers, players, onComple
                         <div className="mb-3 flex items-center gap-3">
                           <div className="h-12 w-12 overflow-hidden rounded-2xl bg-slate-200">
                             {entry.avatar_url ? (
-                              <img src={entry.avatar_url} alt={entry.pseudo} className="h-full w-full object-cover" />
+                              <NextImage src={entry.avatar_url} alt={entry.pseudo} width={48} height={48} unoptimized className="h-full w-full object-cover" />
                             ) : (
                               <div className="flex h-full w-full items-center justify-center bg-gradient-to-br from-[var(--brand)] to-[var(--brand-strong)] text-lg font-black text-white">
                                 {entry.pseudo.charAt(0).toUpperCase()}
@@ -375,7 +378,7 @@ export default function TimelineReveal({ correctDate, answers, players, onComple
                     <div className="flex items-center gap-3">
                       <div className="h-12 w-12 overflow-hidden rounded-2xl bg-white/15">
                         {entry.avatar_url ? (
-                          <img src={entry.avatar_url} alt={entry.pseudo} className="h-full w-full object-cover" />
+                          <NextImage src={entry.avatar_url} alt={entry.pseudo} width={64} height={64} unoptimized className="h-full w-full object-cover" />
                         ) : (
                           <div className="flex h-full w-full items-center justify-center bg-gradient-to-br from-[var(--brand)] to-[var(--brand-strong)] text-lg font-black text-white">
                             {entry.pseudo.charAt(0).toUpperCase()}
